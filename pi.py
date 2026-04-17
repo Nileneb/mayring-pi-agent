@@ -1,0 +1,352 @@
+"""Pi-Agent: qwen3.5:2b mit Memory-Tool-Calling für kontextbewusste Code-Analyse."""
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+from pathlib import Path
+from typing import Any
+
+import httpx
+
+# Tool-Definition (OpenAI-Format, Ollama /api/chat kompatibel)
+_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_memory",
+            "description": "Suche im Projekt-Memory nach Konventionen, bekannten Patterns und Kontext",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Suchbegriff (z.B. 'Laravel artisan Konvention' oder 'Policy authorization pattern')",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Anzahl Ergebnisse (default: 5)",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    }
+]
+
+_SYSTEM_PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "pi_system.md"
+
+_TASK_SYSTEM_PROMPT = """\
+Du bist Pi, ein intelligenter Assistent mit Zugriff auf ein Projekt-Memory-System.
+
+**Tool: search_memory**
+Nutze es, um relevanten Projektkontext abzurufen, bevor du antwortest.
+Maximal 5 Aufrufe pro Auftrag.
+
+**Grundsatz:** Antworte präzise und strukturiert. Nutze das Memory aktiv."""
+
+
+def _load_system_prompt() -> str:
+    if _SYSTEM_PROMPT_PATH.exists():
+        return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+    return "Du bist Pi, ein präziser Code-Reviewer. Antworte nur mit JSON: {\"file_summary\":\"...\",\"potential_smells\":[]}"
+
+
+try:
+    from src.memory.retrieval import compress_for_prompt, search  # type: ignore
+except ImportError:
+    search = None  # type: ignore
+    compress_for_prompt = None  # type: ignore
+
+try:
+    from src.memory.store import init_memory_db  # type: ignore
+except ImportError:
+    init_memory_db = None  # type: ignore
+
+try:
+    from src.memory.ingest import get_or_create_chroma_collection  # type: ignore
+except ImportError:
+    get_or_create_chroma_collection = None  # type: ignore
+
+
+def _execute_search_memory(
+    query: str,
+    top_k: int,
+    conn: sqlite3.Connection,
+    chroma_collection: Any,
+    ollama_url: str,
+    repo_slug: str | None,
+) -> str:
+    """Execute search_memory tool call — returns markdown context string."""
+    _search = search
+    _compress = compress_for_prompt
+    if _search is None or _compress is None:
+        from src.memory.retrieval import compress_for_prompt as _compress, search as _search  # type: ignore
+
+    opts: dict = {"top_k": top_k, "include_text": True}
+    if repo_slug:
+        opts["repo"] = repo_slug
+
+    try:
+        results = _search(
+            query=query,
+            conn=conn,
+            chroma_collection=chroma_collection,
+            ollama_url=ollama_url,
+            opts=opts,
+        )
+        context = _compress(results, char_budget=1500)
+        return context if context else "Keine relevanten Memory-Einträge gefunden."
+    except Exception as exc:
+        return f"Memory-Suche fehlgeschlagen: {exc}"
+
+
+def _agent_loop(
+    messages: list[dict],
+    system_prompt: str,
+    model: str,
+    ollama_url: str,
+    timeout: float,
+    max_tool_calls: int,
+    conn: Any,
+    chroma: Any,
+    repo_slug: str | None,
+    num_predict: int = 1024,
+) -> tuple[str, int]:
+    """Shared tool-calling loop.
+
+    Returns:
+        (final_content, tool_calls_made)
+    Raises:
+        Exception on HTTP failure — callers handle this.
+    """
+    tool_calls_made = 0
+    _base_url = ollama_url.rstrip("/")
+
+    while True:
+        request_body: dict = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "think": False,  # Qwen3: disable thinking mode so content is not empty
+            "system": system_prompt,
+            "options": {
+                "temperature": 0.3,
+                "top_k": 5,
+                "num_predict": num_predict,
+            },
+        }
+        if tool_calls_made < max_tool_calls:
+            request_body["tools"] = _TOOLS
+
+        from src.ollama_client import chat as _oc_chat
+        data = _oc_chat(
+            ollama_url, model, messages,
+            system=system_prompt,
+            tools=request_body.get("tools"),
+            options=request_body["options"],
+            stream=False,
+            timeout=timeout,
+        )
+
+        message = data.get("message", {})
+        tool_calls = message.get("tool_calls") or []
+
+        # No tool calls → final response
+        if not tool_calls or tool_calls_made >= max_tool_calls:
+            return message.get("content", "").strip(), tool_calls_made
+
+        # Append assistant message with tool_calls
+        messages.append({
+            "role": "assistant",
+            "content": message.get("content", ""),
+            "tool_calls": tool_calls,
+        })
+
+        # Execute each tool call
+        for tc in tool_calls:
+            func = tc.get("function", {})
+            func_name = func.get("name", "")
+            args = func.get("arguments", {})
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
+
+            if func_name == "search_memory":
+                query = args.get("query", "")
+                top_k = int(args.get("top_k", 5))
+                result_text = _execute_search_memory(
+                    query=query,
+                    top_k=top_k,
+                    conn=conn,
+                    chroma_collection=chroma,
+                    ollama_url=ollama_url,
+                    repo_slug=repo_slug,
+                )
+                tool_calls_made += 1
+                print(f"    [Pi] search_memory({query!r:.40}) → {len(result_text)} chars", flush=True)
+            else:
+                result_text = f"Unbekanntes Tool: {func_name}"
+
+            messages.append({
+                "role": "tool",
+                "content": result_text,
+            })
+
+        # Safety: if we've hit limit after processing, force final response next iteration
+        if tool_calls_made >= max_tool_calls:
+            continue
+
+
+def analyze_with_memory(
+    file: dict,
+    ollama_url: str,
+    model: str,
+    repo_slug: str | None = None,
+    max_tool_calls: int = 3,
+    timeout: float = 120.0,
+) -> dict:
+    """Analyze a file using Pi agent loop with memory tool-calling.
+
+    Args:
+        file: {"filename": str, "content": str, "category": str}
+        ollama_url: Ollama base URL
+        model: Model name (e.g. "qwen3.5:2b")
+        repo_slug: Repository slug for memory scope filtering
+        max_tool_calls: Maximum number of search_memory calls allowed
+        timeout: HTTP timeout per request in seconds
+
+    Returns:
+        Analysis result dict with "file_summary" and "potential_smells"
+    """
+    from src.analysis.analyzer import _parse_llm_json
+
+    _init_db = init_memory_db
+    if _init_db is None:
+        from src.memory.store import init_memory_db as _init_db  # type: ignore
+    _get_chroma = get_or_create_chroma_collection
+    if _get_chroma is None:
+        from src.memory.ingest import get_or_create_chroma_collection as _get_chroma  # type: ignore
+
+    filename = file.get("filename", "?")
+    content = file.get("content", "")
+    category = file.get("category", "")
+
+    conn = _init_db()
+    chroma = _get_chroma()
+    system_prompt = _load_system_prompt()
+
+    user_content = (
+        f"Analysiere diese Datei. Antworte EXAKT in diesem Format (keine anderen Keys):\n"
+        f'{{\"file_summary\":\"...\",\"potential_smells\":[]}}\n\n'
+        f"Datei: {filename}\nKategorie: {category}\n\n"
+        f"```\n{content[:3000]}\n```"
+    )
+    messages = [{"role": "user", "content": user_content}]
+
+    try:
+        raw_content, tool_calls_made = _agent_loop(
+            messages=messages,
+            system_prompt=system_prompt,
+            model=model,
+            ollama_url=ollama_url,
+            timeout=timeout,
+            max_tool_calls=max_tool_calls,
+            conn=conn,
+            chroma=chroma,
+            repo_slug=repo_slug,
+        )
+    except Exception as exc:
+        return {
+            "filename": filename,
+            "category": category,
+            "file_summary": "",
+            "potential_smells": [],
+            "error": f"Pi-Agent HTTP-Fehler: {exc}",
+            "_parse_error": True,
+        }
+
+    # Strip markdown fences if model wrapped JSON
+    if raw_content.startswith("```"):
+        raw_content = raw_content.strip("`").strip()
+        if raw_content.startswith("json"):
+            raw_content = raw_content[4:].strip()
+
+    parsed = _parse_llm_json(raw_content)
+    if parsed:
+        parsed.setdefault("filename", filename)
+        parsed.setdefault("category", category)
+        parsed.setdefault("truncated", False)
+        parsed.setdefault("_pi_tool_calls", tool_calls_made)
+        smells = parsed.get("potential_smells", [])
+        parsed["potential_smells"] = [s for s in smells if isinstance(s, dict)] if isinstance(smells, list) else []
+        return parsed
+
+    return {
+        "filename": filename,
+        "category": category,
+        "file_summary": raw_content[:200] if raw_content else "",
+        "potential_smells": [],
+        "_parse_error": True,
+        "_pi_tool_calls": tool_calls_made,
+    }
+
+
+def run_task_with_memory(
+    task: str,
+    ollama_url: str,
+    model: str,
+    repo_slug: str | None = None,
+    system_prompt: str | None = None,
+    max_tool_calls: int = 5,
+    timeout: float = 180.0,
+) -> str:
+    """Run a free-form task using Pi agent with memory tool-calling.
+
+    Unlike analyze_with_memory(), this function accepts any task prompt and
+    returns the model's raw text response — no JSON parsing, no fixed format.
+
+    Args:
+        task: Free-form task description, e.g. "Entwickle PICO-Suchterms für..."
+        ollama_url: Ollama base URL
+        model: Model name (e.g. "qwen3.5:2b")
+        repo_slug: Repository slug for memory scope filtering
+        system_prompt: Custom system prompt (default: _TASK_SYSTEM_PROMPT)
+        max_tool_calls: Maximum number of search_memory calls (default: 5)
+        timeout: HTTP timeout per request in seconds
+
+    Returns:
+        Model response as plain text (Markdown, lists, prose — whatever the model returns)
+    """
+    _init_db = init_memory_db
+    if _init_db is None:
+        from src.memory.store import init_memory_db as _init_db  # type: ignore
+    _get_chroma = get_or_create_chroma_collection
+    if _get_chroma is None:
+        from src.memory.ingest import get_or_create_chroma_collection as _get_chroma  # type: ignore
+
+    conn = _init_db()
+    chroma = _get_chroma()
+    prompt = system_prompt or _TASK_SYSTEM_PROMPT
+    messages = [{"role": "user", "content": task}]
+
+    try:
+        content, tool_calls_made = _agent_loop(
+            messages=messages,
+            system_prompt=prompt,
+            model=model,
+            ollama_url=ollama_url,
+            timeout=timeout,
+            max_tool_calls=max_tool_calls,
+            conn=conn,
+            chroma=chroma,
+            repo_slug=repo_slug,
+            num_predict=2048,
+        )
+    except Exception as exc:
+        return f"[Pi-Agent Fehler] {exc}"
+
+    print(f"  [Pi] Fertig — {tool_calls_made} Memory-Abfragen", flush=True)
+    return content
