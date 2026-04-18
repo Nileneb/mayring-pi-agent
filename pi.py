@@ -407,13 +407,22 @@ def run_task_with_memory(
 
     conn = _init_db()
     chroma = _get_chroma()
-    prompt = system_prompt or _TASK_SYSTEM_PROMPT
     messages = [{"role": "user", "content": task}]
+
+    # Ambient context — silent skip if no snapshot
+    ambient_ctx = ""
+    try:
+        from src.memory.ambient import build_context
+        ambient_ctx = build_context(task, conn, ollama_url, repo_slug or "")
+    except Exception:
+        pass
+
+    _system = (system_prompt or _TASK_SYSTEM_PROMPT) + (f"\n\n{ambient_ctx}" if ambient_ctx else "")
 
     try:
         content, tool_calls_made = _agent_loop(
             messages=messages,
-            system_prompt=prompt,
+            system_prompt=_system,
             model=model,
             ollama_url=ollama_url,
             timeout=timeout,
