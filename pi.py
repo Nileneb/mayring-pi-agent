@@ -31,6 +31,27 @@ _TOOLS = [
                 "required": ["query"],
             },
         },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_wiki",
+            "description": "Finde thematisch verwandte Dateien über funktionale Zusammenhänge (Import, Aufruf, Label) — auch ohne semantische Ähnlichkeit",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "Dateiname, Klasse oder Thema (z.B. 'CreditService', 'auth', 'payment')",
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "Repo-Slug (z.B. 'app.linn.games'), leer für alle",
+                    },
+                },
+                "required": ["topic"],
+            },
+        },
     }
 ]
 
@@ -99,6 +120,38 @@ def _execute_search_memory(
         return context if context else "Keine relevanten Memory-Einträge gefunden."
     except Exception as exc:
         return f"Memory-Suche fehlgeschlagen: {exc}"
+
+
+def _execute_search_wiki(args: dict, repo_slug_hint: str = "") -> str:
+    """Execute search_wiki tool call — returns markdown context string."""
+    slug = args.get("repo") or repo_slug_hint
+    wiki_path = Path("cache") / f"{slug}_wiki.md" if slug else None
+
+    if not wiki_path or not wiki_path.exists():
+        cache_dir = Path("cache")
+        wiki_files = list(cache_dir.glob("*_wiki.md")) if cache_dir.exists() else []
+        if not wiki_files:
+            return "Kein Wiki vorhanden. Zuerst --generate-wiki ausführen."
+        wiki_path = wiki_files[0]
+
+    topic = args.get("topic", "").lower()
+    content = wiki_path.read_text(encoding="utf-8")
+
+    sections: list[str] = []
+    current: list[str] = []
+    for line in content.splitlines():
+        if line.startswith("## 🔗"):
+            if current and any(topic in l.lower() for l in current):
+                sections.append("\n".join(current))
+            current = [line]
+        else:
+            current.append(line)
+    if current and any(topic in l.lower() for l in current):
+        sections.append("\n".join(current))
+
+    if not sections:
+        return f"Keine Wiki-Einträge für '{topic}' gefunden."
+    return "\n\n".join(sections[:3])
 
 
 def _agent_loop(
@@ -187,6 +240,11 @@ def _agent_loop(
                 )
                 tool_calls_made += 1
                 print(f"    [Pi] search_memory({query!r:.40}) → {len(result_text)} chars", flush=True)
+            elif func_name == "search_wiki":
+                result_text = _execute_search_wiki(args, repo_slug_hint=repo_slug or "")
+                tool_calls_made += 1
+                topic = args.get("topic", "")
+                print(f"    [Pi] search_wiki({topic!r:.40}) → {len(result_text)} chars", flush=True)
             else:
                 result_text = f"Unbekanntes Tool: {func_name}"
 
