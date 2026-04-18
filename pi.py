@@ -393,9 +393,7 @@ def run_task_with_memory(
     ambient_ctx = ""
     try:
         from src.memory.ambient import build_context
-        from src.api.dependencies import get_conn
-        _conn = get_conn()
-        ambient_ctx = build_context(task, _conn, ollama_url, repo_slug or "")
+        ambient_ctx = build_context(task, conn, ollama_url, repo_slug or "")
     except Exception:
         pass
 
