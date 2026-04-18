@@ -137,14 +137,14 @@ def _execute_search_wiki(args: dict, repo_slug_hint: str = "") -> str:
     slug = args.get("repo") or repo_slug_hint
     safe_slug = _sanitize_repo_slug_for_filename(str(slug)) if slug else ""
     cache_dir = Path("cache")
+    cache_root_resolved = cache_dir.resolve()
     wiki_path: Path | None = None
     if safe_slug:
-        candidate = cache_dir / f"{safe_slug}_wiki.md"
+        candidate = cache_root_resolved / f"{safe_slug}_wiki.md"
         try:
-            cache_root_resolved = cache_dir.resolve()
-            candidate_resolved = candidate.resolve()
+            candidate_resolved = candidate.resolve(strict=False)
             candidate_resolved.relative_to(cache_root_resolved)
-            wiki_path = candidate
+            wiki_path = candidate_resolved
         except (ValueError, OSError):
             wiki_path = None
 
