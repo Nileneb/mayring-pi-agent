@@ -411,9 +411,10 @@ def run_task_with_memory(
 
     # Ambient context — silent skip if no snapshot
     ambient_ctx = ""
+    _trigger_ids: list[str] = []
     try:
         from src.memory.ambient import build_context
-        ambient_ctx = build_context(task, conn, ollama_url, repo_slug or "")
+        ambient_ctx = build_context(task, conn, ollama_url, repo_slug or "", _out_trigger_ids=_trigger_ids)
     except Exception:
         pass
 
@@ -436,4 +437,15 @@ def run_task_with_memory(
         return f"[Pi-Agent Fehler] {exc}"
 
     print(f"  [Pi] Fertig — {tool_calls_made} Memory-Abfragen", flush=True)
+
+    # Implicit feedback — silent fail
+    if ambient_ctx and _trigger_ids:
+        try:
+            from src.memory.ambient import compute_feedback, update_trigger_stats
+            led_to_retrieval = tool_calls_made > 0
+            fb = compute_feedback(ambient_ctx, content, _trigger_ids, led_to_retrieval, conn, ollama_url)
+            update_trigger_stats(_trigger_ids, fb.was_referenced, conn)
+        except Exception:
+            pass
+
     return content
