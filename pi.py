@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -122,10 +123,16 @@ def _execute_search_memory(
         return f"Memory-Suche fehlgeschlagen: {exc}"
 
 
+def _sanitize_repo_slug_for_filename(slug: str) -> str:
+    """Return a filesystem-safe slug for cache wiki filenames."""
+    return re.sub(r"[^A-Za-z0-9._-]", "", slug)
+
+
 def _execute_search_wiki(args: dict, repo_slug_hint: str = "") -> str:
     """Execute search_wiki tool call — returns markdown context string."""
     slug = args.get("repo") or repo_slug_hint
-    wiki_path = Path("cache") / f"{slug}_wiki.md" if slug else None
+    safe_slug = _sanitize_repo_slug_for_filename(str(slug)) if slug else ""
+    wiki_path = Path("cache") / f"{safe_slug}_wiki.md" if safe_slug else None
 
     if not wiki_path or not wiki_path.exists():
         cache_dir = Path("cache")
