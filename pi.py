@@ -418,7 +418,11 @@ def run_task_with_memory(
     _trigger_ids: list[str] = []
     try:
         from src.memory.ambient import build_context
-        ambient_ctx = build_context(task, conn, ollama_url, safe_repo_slug, _out_trigger_ids=_trigger_ids)
+        ambient_ctx = build_context(
+            task, conn, ollama_url, safe_repo_slug,
+            _out_trigger_ids=_trigger_ids,
+            chroma_collection=chroma,
+        )
     except Exception:
         pass
 
@@ -446,7 +450,8 @@ def run_task_with_memory(
     if ambient_ctx and _trigger_ids:
         try:
             from src.memory.ambient import compute_feedback, update_trigger_stats
-            led_to_retrieval = tool_calls_made > 0
+            _retrieval_happened = bool(ambient_ctx and "## Relevante Erinnerungen" in ambient_ctx)
+            led_to_retrieval = tool_calls_made > 0 or _retrieval_happened
             fb = compute_feedback(ambient_ctx, content, _trigger_ids, led_to_retrieval, conn, ollama_url)
             update_trigger_stats(_trigger_ids, fb.was_referenced, conn)
         except Exception:
