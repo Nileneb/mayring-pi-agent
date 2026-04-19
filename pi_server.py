@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 try:
     from fastapi import FastAPI, HTTPException
@@ -37,12 +38,18 @@ def health() -> dict:
 
 @app.post("/task", response_model=TaskResponse)
 async def task(req: TaskRequest) -> TaskResponse:
+    repo_slug = req.repo_slug or ""
+    safe_repo_slug: str | None = None
+    if repo_slug and ".." not in repo_slug and "/" not in repo_slug and "\\" not in repo_slug:
+        if re.fullmatch(r"[A-Za-z0-9._-]+", repo_slug):
+            safe_repo_slug = repo_slug
+
     try:
         result = run_task_with_memory(
             task=req.task,
             ollama_url=_OLLAMA_URL,
             model=_MODEL,
-            repo_slug=req.repo_slug,
+            repo_slug=safe_repo_slug,
             system_prompt=req.system_prompt,
             max_tool_calls=req.max_tool_calls,
             timeout=req.timeout,
