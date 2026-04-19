@@ -398,6 +398,10 @@ def run_task_with_memory(
     Returns:
         Model response as plain text (Markdown, lists, prose — whatever the model returns)
     """
+    safe_repo_slug = repo_slug or ""
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", safe_repo_slug):
+        safe_repo_slug = ""
+
     _init_db = init_memory_db
     if _init_db is None:
         from src.memory.store import init_memory_db as _init_db  # type: ignore
@@ -414,7 +418,7 @@ def run_task_with_memory(
     _trigger_ids: list[str] = []
     try:
         from src.memory.ambient import build_context
-        ambient_ctx = build_context(task, conn, ollama_url, repo_slug or "", _out_trigger_ids=_trigger_ids)
+        ambient_ctx = build_context(task, conn, ollama_url, safe_repo_slug, _out_trigger_ids=_trigger_ids)
     except Exception:
         pass
 
@@ -430,7 +434,7 @@ def run_task_with_memory(
             max_tool_calls=max_tool_calls,
             conn=conn,
             chroma=chroma,
-            repo_slug=repo_slug,
+            repo_slug=safe_repo_slug,
             num_predict=2048,
         )
     except Exception as exc:
