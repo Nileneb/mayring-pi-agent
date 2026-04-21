@@ -6,9 +6,28 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    from src.llm.endpoint import LLMEndpoint
+
+
+def _resolve_ollama_compatible(endpoint: "LLMEndpoint") -> tuple[str, str]:
+    """Unpack an LLMEndpoint into (base_url, model) for the Ollama chat loop.
+
+    Only accepts providers that speak the Ollama /api/chat protocol (or a
+    compatible subset). Anthropic has a different API shape and is not
+    supported here — callers needing anthropic-byo routing must branch off
+    to dispatch.generate() before the tool-calling loop.
+    """
+    if endpoint.provider not in ("ollama", "platform", "openai"):
+        raise NotImplementedError(
+            f"pi.py tool-calling loop does not support provider={endpoint.provider!r}. "
+            "Use src.llm.dispatch.generate() for anthropic or other non-Ollama providers."
+        )
+    return endpoint.base_url, endpoint.model
 
 # Tool-Definition (OpenAI-Format, Ollama /api/chat kompatibel)
 _TOOLS = [
@@ -285,20 +304,28 @@ def analyze_with_memory(
     repo_slug: str | None = None,
     max_tool_calls: int = 3,
     timeout: float = 120.0,
+    endpoint: "LLMEndpoint | None" = None,
 ) -> dict:
     """Analyze a file using Pi agent loop with memory tool-calling.
 
     Args:
         file: {"filename": str, "content": str, "category": str}
-        ollama_url: Ollama base URL
-        model: Model name (e.g. "qwen3.5:2b")
+        ollama_url: Default Ollama base URL. Ignored if `endpoint` is set.
+        model: Default model name. Ignored if `endpoint` is set.
         repo_slug: Repository slug for memory scope filtering
         max_tool_calls: Maximum number of search_memory calls allowed
         timeout: HTTP timeout per request in seconds
+        endpoint: Optional LLMEndpoint overriding ollama_url+model. Callers that
+            resolve a per-user/per-workspace endpoint (via get_endpoint_for_request)
+            should pass it here. Provider must be ollama/platform/openai —
+            anthropic needs dispatch.generate and is not supported in the
+            tool-calling loop yet.
 
     Returns:
         Analysis result dict with "file_summary" and "potential_smells"
     """
+    if endpoint is not None:
+        ollama_url, model = _resolve_ollama_compatible(endpoint)
     from src.analysis.analyzer import _parse_llm_json
 
     _init_db = init_memory_db
@@ -380,6 +407,7 @@ def run_task_with_memory(
     system_prompt: str | None = None,
     max_tool_calls: int = 5,
     timeout: float = 180.0,
+    endpoint: "LLMEndpoint | None" = None,
 ) -> str:
     """Run a free-form task using Pi agent with memory tool-calling.
 
@@ -388,16 +416,20 @@ def run_task_with_memory(
 
     Args:
         task: Free-form task description, e.g. "Entwickle PICO-Suchterms für..."
-        ollama_url: Ollama base URL
-        model: Model name (e.g. "qwen3.5:2b")
+        ollama_url: Default Ollama base URL. Ignored if `endpoint` is set.
+        model: Default model name. Ignored if `endpoint` is set.
         repo_slug: Repository slug for memory scope filtering
         system_prompt: Custom system prompt (default: _TASK_SYSTEM_PROMPT)
         max_tool_calls: Maximum number of search_memory calls (default: 5)
         timeout: HTTP timeout per request in seconds
+        endpoint: Optional LLMEndpoint from get_endpoint_for_request. Overrides
+            ollama_url+model when set. Provider must be ollama/platform/openai.
 
     Returns:
         Model response as plain text (Markdown, lists, prose — whatever the model returns)
     """
+    if endpoint is not None:
+        ollama_url, model = _resolve_ollama_compatible(endpoint)
     safe_repo_slug = repo_slug or ""
     if not re.fullmatch(r"[A-Za-z0-9._-]+", safe_repo_slug):
         safe_repo_slug = ""
