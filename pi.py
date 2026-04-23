@@ -408,6 +408,7 @@ def run_task_with_memory(
     max_tool_calls: int = 5,
     timeout: float = 180.0,
     endpoint: "LLMEndpoint | None" = None,
+    disable_memory: bool = False,
 ) -> str:
     """Run a free-form task using Pi agent with memory tool-calling.
 
@@ -424,6 +425,8 @@ def run_task_with_memory(
         timeout: HTTP timeout per request in seconds
         endpoint: Optional LLMEndpoint from get_endpoint_for_request. Overrides
             ollama_url+model when set. Provider must be ollama/platform/openai.
+        disable_memory: When True, skip ambient context injection and all memory
+            tool calls — useful as a no-memory baseline for benchmarking.
 
     Returns:
         Model response as plain text (Markdown, lists, prose — whatever the model returns)
@@ -445,19 +448,21 @@ def run_task_with_memory(
     chroma = _get_chroma()
     messages = [{"role": "user", "content": task}]
 
-    # Ambient context — silent skip if no snapshot
+    # Ambient context — silent skip if no snapshot or memory disabled
     ambient_ctx = ""
     _trigger_ids: list[str] = []
-    try:
-        from src.memory.ambient import build_context
-        ambient_ctx = build_context(
-            task, conn, ollama_url, safe_repo_slug,
-            _out_trigger_ids=_trigger_ids,
-            chroma_collection=chroma,
-        )
-    except Exception:
-        pass
+    if not disable_memory:
+        try:
+            from src.memory.ambient import build_context
+            ambient_ctx = build_context(
+                task, conn, ollama_url, safe_repo_slug,
+                _out_trigger_ids=_trigger_ids,
+                chroma_collection=chroma,
+            )
+        except Exception:
+            pass
 
+    _effective_max_tool_calls = 0 if disable_memory else max_tool_calls
     _system = (system_prompt or _TASK_SYSTEM_PROMPT) + (f"\n\n{ambient_ctx}" if ambient_ctx else "")
 
     try:
@@ -467,7 +472,7 @@ def run_task_with_memory(
             model=model,
             ollama_url=ollama_url,
             timeout=timeout,
-            max_tool_calls=max_tool_calls,
+            max_tool_calls=_effective_max_tool_calls,
             conn=conn,
             chroma=chroma,
             repo_slug=safe_repo_slug,
