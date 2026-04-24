@@ -154,28 +154,74 @@ def _sanitize_repo_slug_for_filename(slug: str) -> str:
 
 
 def _execute_search_wiki(args: dict, repo_slug_hint: str = "") -> str:
-    """Execute search_wiki tool call — returns markdown context string."""
+    """Execute search_wiki tool call — returns markdown context string.
+
+    Tries wiki_v2 DB first (live graph), falls back to legacy *_wiki.md.
+    """
     slug = args.get("repo") or repo_slug_hint
+    topic = args.get("topic", "").lower()
+
+    # --- wiki_v2 path ---
     safe_slug = _sanitize_repo_slug_for_filename(str(slug)) if slug else ""
+    if safe_slug:
+        try:
+            from src.config import CACHE_DIR
+            from src.wiki_v2.graph import WikiGraph
+            db = WikiGraph(safe_slug, safe_slug, CACHE_DIR / "wiki_v2.db")
+            if db.node_count() > 0:
+                clusters = db.get_clusters()
+                nodes = db.all_nodes()
+                db.close()
+
+                # Match clusters by name/description containing topic
+                matched = [
+                    c for c in clusters
+                    if topic in c.name.lower() or topic in (c.description or "").lower()
+                ] if topic else clusters[:5]
+
+                if not matched and clusters:
+                    matched = clusters[:3]
+
+                parts = []
+                node_tiers = {n.id: n.turbulence_tier for n in nodes}
+                for c in matched[:4]:
+                    members_fmt = []
+                    for m in c.members[:8]:
+                        tier = node_tiers.get(m, "")
+                        tier_mark = " 🔥" if tier == "hot" else (" ⚡" if tier == "warm" else "")
+                        members_fmt.append(f"  - {m}{tier_mark}")
+                    more = f"\n  …+{len(c.members)-8} weitere" if len(c.members) > 8 else ""
+                    parts.append(
+                        f"### {c.name}\n"
+                        + (f"{c.description}\n" if c.description else "")
+                        + "\n".join(members_fmt) + more
+                    )
+
+                if parts:
+                    return f"## Wiki-Cluster für '{topic}'\n\n" + "\n\n".join(parts)
+            else:
+                db.close()
+        except Exception:
+            pass
+
+    # --- legacy fallback: *_wiki.md ---
+    safe_slug_fs = _sanitize_repo_slug_for_filename(str(slug)) if slug else ""
     cache_dir = Path("cache")
     wiki_files = list(cache_dir.glob("*_wiki.md")) if cache_dir.exists() else []
     if not wiki_files:
-        return "Kein Wiki vorhanden. Zuerst --generate-wiki ausführen."
+        return "Kein Wiki vorhanden. Zuerst --generate-wiki oder --populate-memory ausführen."
 
     wiki_path: Path | None = None
-    if safe_slug:
-        expected_name = f"{safe_slug}_wiki.md"
+    if safe_slug_fs:
+        expected_name = f"{safe_slug_fs}_wiki.md"
         for candidate in wiki_files:
             if candidate.name == expected_name:
                 wiki_path = candidate
                 break
-
     if wiki_path is None:
         wiki_path = wiki_files[0]
 
-    topic = args.get("topic", "").lower()
     content = wiki_path.read_text(encoding="utf-8")
-
     sections: list[str] = []
     current: list[str] = []
     for line in content.splitlines():
