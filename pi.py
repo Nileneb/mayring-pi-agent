@@ -305,6 +305,7 @@ def analyze_with_memory(
     max_tool_calls: int = 3,
     timeout: float = 120.0,
     endpoint: "LLMEndpoint | None" = None,
+    wiki_context: str = "",
 ) -> dict:
     """Analyze a file using Pi agent loop with memory tool-calling.
 
@@ -342,6 +343,8 @@ def analyze_with_memory(
     conn = _init_db()
     chroma = _get_chroma()
     system_prompt = _load_system_prompt()
+    if wiki_context:
+        system_prompt += f"\n\n## Projekt-Kontext (Wiki)\n{wiki_context}"
 
     user_content = (
         f"Analysiere diese Datei. Antworte EXAKT in diesem Format (keine anderen Keys):\n"
