@@ -15,7 +15,9 @@ from src.agents.pi import run_task_with_memory
 app = FastAPI(title="MayringCoder Pi-Agent", version="1.0.0")
 
 _OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:0.6b")
+def _model() -> str:
+    from src.model_router import ModelRouter
+    return ModelRouter(_OLLAMA_URL).resolve("analysis") or "qwen3:0.6b"
 _PORT = int(os.getenv("PI_PORT", "8091"))
 
 
@@ -48,7 +50,7 @@ async def task(req: TaskRequest) -> TaskResponse:
         result = run_task_with_memory(
             task=req.task,
             ollama_url=_OLLAMA_URL,
-            model=_MODEL,
+            model=_model(),
             repo_slug=safe_repo_slug,
             system_prompt=req.system_prompt,
             max_tool_calls=req.max_tool_calls,
