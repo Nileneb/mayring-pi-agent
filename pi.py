@@ -398,6 +398,12 @@ def analyze_with_memory(
     content = file.get("content", "")
     category = file.get("category", "")
 
+    _CONTENT_LIMIT = 3000
+    content_truncated = len(content) > _CONTENT_LIMIT
+    if content_truncated:
+        print(f"  [Pi] WARN: {filename} truncated {len(content)} → {_CONTENT_LIMIT} chars", flush=True)
+    content_for_prompt = content[:_CONTENT_LIMIT]
+
     conn = _init_db()
     chroma = _get_chroma()
     system_prompt = _load_system_prompt()
@@ -408,7 +414,7 @@ def analyze_with_memory(
         f"Analysiere diese Datei. Antworte EXAKT in diesem Format (keine anderen Keys):\n"
         f'{{\"file_summary\":\"...\",\"potential_smells\":[]}}\n\n'
         f"Datei: {filename}\nKategorie: {category}\n\n"
-        f"```\n{content[:3000]}\n```"
+        f"```\n{content_for_prompt}\n```"
     )
     messages = [{"role": "user", "content": user_content}]
 
@@ -433,6 +439,8 @@ def analyze_with_memory(
             "error": f"Pi-Agent HTTP-Fehler: {exc}",
             "_parse_error": True,
         }
+    finally:
+        conn.close()
 
     # Strip markdown fences if model wrapped JSON
     if raw_content.startswith("```"):
@@ -444,7 +452,7 @@ def analyze_with_memory(
     if parsed:
         parsed.setdefault("filename", filename)
         parsed.setdefault("category", category)
-        parsed.setdefault("truncated", False)
+        parsed["truncated"] = content_truncated
         parsed.setdefault("_pi_tool_calls", tool_calls_made)
         smells = parsed.get("potential_smells", [])
         parsed["potential_smells"] = [s for s in smells if isinstance(s, dict)] if isinstance(smells, list) else []
@@ -457,6 +465,7 @@ def analyze_with_memory(
         "potential_smells": [],
         "_parse_error": True,
         "_pi_tool_calls": tool_calls_made,
+        "truncated": content_truncated,
     }
 
 
@@ -526,6 +535,8 @@ def run_task_with_memory(
     _effective_max_tool_calls = 0 if disable_memory else max_tool_calls
     _system = (system_prompt or _TASK_SYSTEM_PROMPT) + (f"\n\n{ambient_ctx}" if ambient_ctx else "")
 
+    content = ""
+    tool_calls_made = 0
     try:
         content, tool_calls_made = _agent_loop(
             messages=messages,
@@ -540,6 +551,7 @@ def run_task_with_memory(
             num_predict=2048,
         )
     except Exception as exc:
+        conn.close()
         return f"[Pi-Agent Fehler] {exc}"
 
     print(f"  [Pi] Fertig — {tool_calls_made} Memory-Abfragen", flush=True)
@@ -555,4 +567,5 @@ def run_task_with_memory(
         except Exception:
             pass
 
+    conn.close()
     return content

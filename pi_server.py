@@ -5,19 +5,27 @@ import os
 import re
 
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import Depends, FastAPI, HTTPException
     from pydantic import BaseModel
 except ImportError as exc:
     raise ImportError("pip install fastapi uvicorn") from exc
 
 from src.agents.pi import run_task_with_memory
+from src.api.auth import get_token_info
 
 app = FastAPI(title="MayringCoder Pi-Agent", version="1.0.0")
 
 _OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+_FALLBACK_MODEL = "qwen3:latest"
+
 def _model() -> str:
     from src.model_router import ModelRouter
-    return ModelRouter(_OLLAMA_URL).resolve("analysis") or "qwen3:0.6b"
+    resolved = ModelRouter(_OLLAMA_URL).resolve("analysis")
+    if not resolved:
+        print(f"  [Pi] WARN: ModelRouter returned nothing — falling back to {_FALLBACK_MODEL}", flush=True)
+        return _FALLBACK_MODEL
+    return resolved
+
 _PORT = int(os.getenv("PI_PORT", "8091"))
 
 
@@ -39,7 +47,7 @@ def health() -> dict:
 
 
 @app.post("/task", response_model=TaskResponse)
-async def task(req: TaskRequest) -> TaskResponse:
+async def task(req: TaskRequest, _: object = Depends(get_token_info)) -> TaskResponse:
     repo_slug = req.repo_slug or ""
     safe_repo_slug: str | None = None
     if repo_slug and ".." not in repo_slug and "/" not in repo_slug and "\\" not in repo_slug:
