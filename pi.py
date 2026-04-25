@@ -257,6 +257,7 @@ def _agent_loop(
         Exception on HTTP failure — callers handle this.
     """
     tool_calls_made = 0
+    _start = time.perf_counter()
     _base_url = ollama_url.rstrip("/")
 
     while True:
@@ -290,6 +291,19 @@ def _agent_loop(
 
         # No tool calls → final response
         if not tool_calls or tool_calls_made >= max_tool_calls:
+            try:
+                from src.memory.store import log_llm_call
+                _dur = int((time.perf_counter() - _start) * 1000)
+                _prompt_text = messages[0].get("content", "") if messages else ""
+                log_llm_call(
+                    conn, "pi_task", model,
+                    prompt=_prompt_text,
+                    response=message.get("content", ""),
+                    tool_calls=tool_calls_made,
+                    duration_ms=_dur,
+                )
+            except Exception:
+                pass
             return message.get("content", "").strip(), tool_calls_made
 
         # Append assistant message with tool_calls
