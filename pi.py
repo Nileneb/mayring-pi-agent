@@ -70,19 +70,67 @@ _TOOLS = [
                 "required": ["topic"],
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Liest den Inhalt einer Datei vom Dateisystem",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absoluter oder relativer Pfad zur Datei"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Schreibt Inhalt in eine Datei (überschreibt falls vorhanden)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absoluter oder relativer Pfad zur Datei"},
+                    "content": {"type": "string", "description": "Dateiinhalt"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Führt einen Shell-Befehl aus und gibt stdout+stderr zurück",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell-Befehl"},
+                    "cwd": {"type": "string", "description": "Arbeitsverzeichnis (optional)"},
+                },
+                "required": ["command"],
+            },
+        },
+    },
 ]
 
 _SYSTEM_PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "pi_system.md"
 
 _TASK_SYSTEM_PROMPT = """\
-Du bist Pi, ein intelligenter Assistent mit Zugriff auf ein Projekt-Memory-System.
+Du bist Pi, ein intelligenter Coding-Agent mit Zugriff auf Dateisystem und Memory.
 
-**Tool: search_memory**
-Nutze es, um relevanten Projektkontext abzurufen, bevor du antwortest.
-Maximal 5 Aufrufe pro Auftrag.
+**Tools:**
+- search_memory: Projektkontext, Konventionen, bekannte Patterns abrufen
+- search_wiki: Thematisch verwandte Dateien finden
+- read_file: Datei lesen (absoluter Pfad bevorzugt)
+- write_file: Datei schreiben/überschreiben
+- bash: Shell-Befehl ausführen (git, tests, grep, ls, etc.)
 
-**Grundsatz:** Antworte präzise und strukturiert. Nutze das Memory aktiv."""
+**Workflow für Code-Tasks:** search_memory → read_file → write_file → bash (Tests/Commit)
+**Grundsatz:** Implementiere direkt. Maximal 10 Tool-Aufrufe pro Task."""
 
 
 def _load_system_prompt() -> str:
@@ -342,6 +390,41 @@ def _agent_loop(
                 tool_calls_made += 1
                 topic = args.get("topic", "")
                 print(f"    [Pi] search_wiki({topic!r:.40}) → {len(result_text)} chars", flush=True)
+            elif func_name == "read_file":
+                try:
+                    p = Path(args.get("path", "")).expanduser()
+                    content = p.read_text(encoding="utf-8", errors="replace")
+                    result_text = content[:8000] + ("\n[abgeschnitten]" if len(content) > 8000 else "")
+                    print(f"    [Pi] read_file({str(p):.50}) → {len(content)} chars", flush=True)
+                except Exception as exc:
+                    result_text = f"read_file Fehler: {exc}"
+            elif func_name == "write_file":
+                try:
+                    p = Path(args.get("path", "")).expanduser()
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text(args.get("content", ""), encoding="utf-8")
+                    result_text = f"OK: {p} geschrieben ({len(args.get('content', ''))} Zeichen)"
+                    print(f"    [Pi] write_file({str(p):.50})", flush=True)
+                except Exception as exc:
+                    result_text = f"write_file Fehler: {exc}"
+            elif func_name == "bash":
+                import subprocess
+                try:
+                    proc = subprocess.run(
+                        args.get("command", ""),
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                        cwd=args.get("cwd") or None,
+                    )
+                    out = (proc.stdout + proc.stderr)[:4000]
+                    result_text = f"exit={proc.returncode}\n{out}"
+                    print(f"    [Pi] bash({args.get('command', ''):.50}) → exit={proc.returncode}", flush=True)
+                except subprocess.TimeoutExpired:
+                    result_text = "bash Timeout (60s)"
+                except Exception as exc:
+                    result_text = f"bash Fehler: {exc}"
             else:
                 result_text = f"Unbekanntes Tool: {func_name}"
 
@@ -475,7 +558,7 @@ def run_task_with_memory(
     model: str,
     repo_slug: str | None = None,
     system_prompt: str | None = None,
-    max_tool_calls: int = 5,
+    max_tool_calls: int = 10,
     timeout: float = 180.0,
     endpoint: "LLMEndpoint | None" = None,
     disable_memory: bool = False,
