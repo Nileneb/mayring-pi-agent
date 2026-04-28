@@ -2,11 +2,22 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+# Cloud memory search endpoint — hybrid pipeline (vector + symbolic + recency
+# + source_affinity) runs server-side with ChromaDB. Local SQLite + Chroma
+# remain as offline fallbacks only; preferred path is the cloud API.
+_MEMORY_API_URL = os.environ.get("MAYRING_API_URL", "https://mcp.linn.games").rstrip("/")
+_MEMORY_JWT_FILE = os.path.expanduser(
+    os.environ.get("MAYRING_JWT_FILE", "~/.config/mayring/hook.jwt")
+)
 
 if TYPE_CHECKING:
     from src.llm.endpoint import LLMEndpoint
@@ -156,6 +167,69 @@ except ImportError:
     get_or_create_chroma_collection = None  # type: ignore
 
 
+def _cloud_search(
+    query: str,
+    top_k: int,
+    repo: str | None,
+    char_budget: int = 1800,
+    timeout: float = 30.0,
+) -> str | None:
+    """Hybrid memory search via the cloud API (server-side ChromaDB + SQLite).
+
+    Returns formatted markdown context, "" if no results, or None if the cloud
+    is unreachable (signalling the caller to try the local fallback).
+    """
+    try:
+        token = Path(_MEMORY_JWT_FILE).read_text().strip()
+    except (FileNotFoundError, OSError):
+        return None
+    if not token:
+        return None
+
+    payload: dict[str, Any] = {"query": query, "top_k": top_k}
+    if repo:
+        payload["repo"] = repo
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{_MEMORY_API_URL}/memory/search",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return None
+
+    results = data.get("results") or []
+    if not results:
+        return ""
+
+    out: list[str] = []
+    used = 0
+    for r in results:
+        sid = (r.get("source_id") or "")[:80]
+        chunk_id = (r.get("chunk_id") or "")[:24]
+        score = float(r.get("score_final") or 0.0)
+        text = (r.get("text") or "").strip()
+        head = f"### {sid}  (score={score:.2f}, chunk={chunk_id})"
+        max_body = max(0, char_budget - used - len(head) - 4)
+        if max_body <= 0:
+            break
+        if len(text) > max_body:
+            text = text[:max_body].rstrip() + " […]"
+        block = f"{head}\n{text}\n"
+        out.append(block)
+        used += len(block)
+        if used >= char_budget:
+            break
+    return "\n".join(out)
+
+
 def _execute_search_memory(
     query: str,
     top_k: int,
@@ -164,7 +238,18 @@ def _execute_search_memory(
     ollama_url: str,
     repo_slug: str | None,
 ) -> str:
-    """Execute search_memory tool call — returns markdown context string."""
+    """Execute search_memory tool call — returns markdown context string.
+
+    Architecture: ChromaDB lives on the cloud server (mcp.linn.games), local
+    side keeps only an SQLite replica. Therefore prefer the cloud /memory/search
+    endpoint (full 4-stage hybrid pipeline). Fall back to the local
+    `retrieval.search()` only if the cloud is unreachable AND a populated
+    local Chroma collection is available — the legacy offline path.
+    """
+    cloud_text = _cloud_search(query, top_k, repo_slug)
+    if cloud_text is not None:
+        return cloud_text or "Keine relevanten Memory-Einträge gefunden."
+
     _search = search
     _compress = compress_for_prompt
     if _search is None or _compress is None:
@@ -185,7 +270,7 @@ def _execute_search_memory(
         context = _compress(results, char_budget=1500)
         return context if context else "Keine relevanten Memory-Einträge gefunden."
     except Exception as exc:
-        return f"Memory-Suche fehlgeschlagen: {exc}"
+        return f"Memory-Suche fehlgeschlagen (lokaler Fallback): {exc}"
 
 
 def _sanitize_repo_slug_for_filename(slug: str) -> str:
