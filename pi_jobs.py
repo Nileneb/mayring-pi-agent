@@ -31,6 +31,7 @@ from src.config import CACHE_DIR
 
 VALID_STATUSES = ("queued", "running", "completed", "failed")
 VALID_PREFER = ("auto", "local", "cloud")
+VALID_SCOPE = ("local", "cloud")
 
 
 @dataclass
@@ -46,6 +47,10 @@ class PiJob:
     result_json: str = ""
     error: str = ""
     timeout_s: float = 180.0
+    scope: str = "local"
+    capability_required: str = ""
+    claimed_by: str = ""
+    claimed_at: str = ""
     created_at: str = ""
     started_at: str = ""
     finished_at: str = ""
@@ -89,6 +94,55 @@ def _conn(db_path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+def _do_insert(
+    *,
+    task_text: str,
+    repo_slug: str,
+    workspace_id: str,
+    prefer: str,
+    ollama_url: str,
+    model: str,
+    timeout_s: float,
+    scope: str,
+    capability_required: str,
+    db_path: Path | None,
+) -> PiJob:
+    if prefer not in VALID_PREFER:
+        raise ValueError(f"prefer must be one of {VALID_PREFER}, got {prefer!r}")
+    if scope not in VALID_SCOPE:
+        raise ValueError(f"scope must be one of {VALID_SCOPE}, got {scope!r}")
+    job = PiJob(
+        job_id=_new_job_id(),
+        task_text=task_text,
+        repo_slug=repo_slug,
+        workspace_id=workspace_id,
+        prefer=prefer,
+        ollama_url=ollama_url,
+        model=model,
+        timeout_s=float(timeout_s),
+        scope=scope,
+        capability_required=capability_required,
+        created_at=_now_iso(),
+    )
+    conn = _conn(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO pi_jobs (job_id, task_text, repo_slug, workspace_id, "
+            "status, prefer, ollama_url, model, timeout_s, scope, "
+            "capability_required, created_at) "
+            "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
+            (
+                job.job_id, job.task_text, job.repo_slug, job.workspace_id,
+                job.prefer, job.ollama_url, job.model, job.timeout_s,
+                job.scope, job.capability_required, job.created_at,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return job
+
+
 def insert_job(
     task_text: str,
     *,
@@ -100,45 +154,47 @@ def insert_job(
     timeout_s: float = 180.0,
     db_path: Path | None = None,
 ) -> PiJob:
-    """Insert a new job in `queued` state. Returns the persisted job."""
-    if prefer not in VALID_PREFER:
-        raise ValueError(f"prefer must be one of {VALID_PREFER}, got {prefer!r}")
-    job = PiJob(
-        job_id=_new_job_id(),
-        task_text=task_text,
-        repo_slug=repo_slug,
-        workspace_id=workspace_id,
-        prefer=prefer,
-        ollama_url=ollama_url,
-        model=model,
-        timeout_s=float(timeout_s),
-        created_at=_now_iso(),
+    """Insert a LOCAL job (Phase 1 path). Worker drains via claim_next()."""
+    return _do_insert(
+        task_text=task_text, repo_slug=repo_slug, workspace_id=workspace_id,
+        prefer=prefer, ollama_url=ollama_url, model=model, timeout_s=timeout_s,
+        scope="local", capability_required="", db_path=db_path,
     )
-    conn = _conn(db_path)
-    try:
-        conn.execute(
-            "INSERT INTO pi_jobs (job_id, task_text, repo_slug, workspace_id, "
-            "status, prefer, ollama_url, model, timeout_s, created_at) "
-            "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
-            (
-                job.job_id, job.task_text, job.repo_slug, job.workspace_id,
-                job.prefer, job.ollama_url, job.model, job.timeout_s, job.created_at,
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return job
+
+
+def insert_cloud_job(
+    task_text: str,
+    *,
+    repo_slug: str = "",
+    workspace_id: str = "default",
+    prefer: str = "auto",
+    ollama_url: str = "",
+    model: str = "",
+    timeout_s: float = 180.0,
+    capability_required: str = "",
+    db_path: Path | None = None,
+) -> PiJob:
+    """Insert a CLOUD-routable job (Phase 2 path).
+
+    `capability_required` is a comma-separated whitelist; an empty string
+    matches any worker. Workers claim with `claim_cloud_next()`.
+    """
+    return _do_insert(
+        task_text=task_text, repo_slug=repo_slug, workspace_id=workspace_id,
+        prefer=prefer, ollama_url=ollama_url, model=model, timeout_s=timeout_s,
+        scope="cloud", capability_required=capability_required, db_path=db_path,
+    )
 
 
 def claim_next(*, db_path: Path | None = None) -> PiJob | None:
-    """Atomically take the oldest queued job, flip to 'running'."""
+    """Atomically take the oldest queued LOCAL job, flip to 'running'."""
     conn = _conn(db_path)
     try:
         # Single UPDATE … WHERE … = atomic flip; RETURNING is sqlite >= 3.35
         row = conn.execute(
             "UPDATE pi_jobs SET status='running', started_at=? "
-            "WHERE job_id = (SELECT job_id FROM pi_jobs WHERE status='queued' "
+            "WHERE job_id = (SELECT job_id FROM pi_jobs "
+            "                WHERE status='queued' AND scope='local' "
             "                ORDER BY created_at LIMIT 1) "
             "RETURNING *",
             (_now_iso(),),
@@ -147,6 +203,64 @@ def claim_next(*, db_path: Path | None = None) -> PiJob | None:
     finally:
         conn.close()
     return _row_to_job(row) if row else None
+
+
+def _capability_match(capability_required: str, capabilities: list[str]) -> bool:
+    if not capability_required:
+        return True
+    needed = {c.strip() for c in capability_required.split(",") if c.strip()}
+    return needed.issubset(set(capabilities))
+
+
+def claim_cloud_next(
+    worker_id: str,
+    capabilities: list[str] | None = None,
+    *,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> PiJob | None:
+    """Atomically take the oldest queued CLOUD job whose capability_required
+    is satisfied by `capabilities`.
+
+    Strategy: SELECT candidates with the static workspace + scope filters in
+    SQL, filter capability in Python, then issue a targeted UPDATE against
+    the chosen job_id with `status='queued'` as a guard. Two concurrent
+    claimers can't both win the same row.
+    """
+    if not worker_id:
+        raise ValueError("worker_id required for cloud claim")
+    caps = list(capabilities or [])
+    conn = _conn(db_path)
+    try:
+        if workspace_id:
+            rows = conn.execute(
+                "SELECT * FROM pi_jobs WHERE status='queued' AND scope='cloud' "
+                "AND workspace_id=? ORDER BY created_at LIMIT 20",
+                (workspace_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM pi_jobs WHERE status='queued' AND scope='cloud' "
+                "ORDER BY created_at LIMIT 20",
+            ).fetchall()
+        for r in rows:
+            if not _capability_match(r["capability_required"] or "", caps):
+                continue
+            now = _now_iso()
+            updated = conn.execute(
+                "UPDATE pi_jobs SET status='running', started_at=?, "
+                "claimed_by=?, claimed_at=? "
+                "WHERE job_id=? AND status='queued' "
+                "RETURNING *",
+                (now, worker_id, now, r["job_id"]),
+            ).fetchone()
+            if updated is None:
+                continue  # lost the race, try the next candidate
+            conn.commit()
+            return _row_to_job(updated)
+        return None
+    finally:
+        conn.close()
 
 
 def complete_job(job_id: str, result: Any, *, db_path: Path | None = None) -> None:
@@ -178,33 +292,61 @@ def fail_job(job_id: str, error: str, *, db_path: Path | None = None) -> None:
         conn.close()
 
 
-def get_job(job_id: str, *, db_path: Path | None = None) -> PiJob | None:
+def get_job(
+    job_id: str,
+    *,
+    workspace_id: str | None = None,
+    db_path: Path | None = None,
+) -> PiJob | None:
+    """Read a single job. When `workspace_id` is set, only return the row when
+    it belongs to that tenant — otherwise return None (treat foreign jobs as
+    "not found" so a caller cannot probe for their existence)."""
     conn = _conn(db_path)
     try:
-        row = conn.execute(
-            "SELECT * FROM pi_jobs WHERE job_id=?", (job_id,),
-        ).fetchone()
+        if workspace_id:
+            row = conn.execute(
+                "SELECT * FROM pi_jobs WHERE job_id=? AND workspace_id=?",
+                (job_id, workspace_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM pi_jobs WHERE job_id=?", (job_id,),
+            ).fetchone()
     finally:
         conn.close()
     return _row_to_job(row) if row else None
 
 
 def list_recent(
-    *, only_active: bool = False, limit: int = 10, db_path: Path | None = None,
+    *,
+    only_active: bool = False,
+    scope: str | None = None,
+    workspace_id: str | None = None,
+    limit: int = 10,
+    db_path: Path | None = None,
 ) -> list[PiJob]:
+    """Return recent jobs. When `workspace_id` is set, the result is scoped
+    to that tenant — every MCP-facing caller MUST pass it. Internal callers
+    (worker loops) may omit it deliberately."""
+    where = []
+    params: list = []
+    if only_active:
+        where.append("status IN ('queued', 'running')")
+    if scope:
+        where.append("scope=?")
+        params.append(scope)
+    if workspace_id:
+        where.append("workspace_id=?")
+        params.append(workspace_id)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    params.append(limit)
     conn = _conn(db_path)
     try:
-        if only_active:
-            rows = conn.execute(
-                "SELECT * FROM pi_jobs WHERE status IN ('queued', 'running') "
-                "ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM pi_jobs ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+        rows = conn.execute(
+            f"SELECT * FROM pi_jobs{where_sql} "
+            f"ORDER BY created_at DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
     finally:
         conn.close()
     return [_row_to_job(r) for r in rows]
@@ -223,6 +365,10 @@ def _row_to_job(row: sqlite3.Row) -> PiJob:
         result_json=row["result_json"] or "",
         error=row["error"] or "",
         timeout_s=float(row["timeout_s"] or 180.0),
+        scope=row["scope"] or "local",
+        capability_required=row["capability_required"] or "",
+        claimed_by=row["claimed_by"] or "",
+        claimed_at=row["claimed_at"] or "",
         created_at=row["created_at"],
         started_at=row["started_at"] or "",
         finished_at=row["finished_at"] or "",
@@ -232,9 +378,12 @@ def _row_to_job(row: sqlite3.Row) -> PiJob:
 __all__ = (
     "PiJob",
     "VALID_PREFER",
+    "VALID_SCOPE",
     "VALID_STATUSES",
     "insert_job",
+    "insert_cloud_job",
     "claim_next",
+    "claim_cloud_next",
     "complete_job",
     "fail_job",
     "get_job",
