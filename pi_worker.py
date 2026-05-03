@@ -239,6 +239,23 @@ def _cloud_loop(stop: threading.Event, poll_interval: float) -> None:
         executor.submit(_execute, job, on_cloud_complete=_on_cloud_complete)
 
 
+def _ensure_schema() -> None:
+    """Run the idempotent migration on whichever DB the worker will read.
+
+    pi_jobs uses `CACHE_DIR / memory.db` by default — distinct from
+    MAYRING_LOCAL_DB which local_mcp.py initialises. Without this call,
+    the worker thread immediately hits "no such table: pi_jobs" because
+    nothing has run init_memory_db() against that path. Idempotent: a
+    fully-migrated DB short-circuits in milliseconds.
+    """
+    try:
+        from src.config import CACHE_DIR
+        from src.memory.store import init_memory_db
+        init_memory_db(CACHE_DIR / "memory.db").close()
+    except Exception:
+        logger.exception("pi_worker: schema init failed (worker will likely error on claim_next)")
+
+
 def start(
     *,
     poll_interval: float = _DEFAULT_POLL_INTERVAL,
@@ -257,6 +274,7 @@ def start(
             logger.info("pi_worker: disabled via PI_ASYNC_DISABLED")
             _started = True
             return False
+        _ensure_schema()
         _stop_event = threading.Event()
         _loop_thread = threading.Thread(
             target=_loop,
