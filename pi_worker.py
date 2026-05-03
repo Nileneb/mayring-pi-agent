@@ -46,6 +46,43 @@ _loop_thread: threading.Thread | None = None
 _cloud_thread: threading.Thread | None = None
 
 
+_OLLAMA_CONFIG_FILE = Path.home() / ".config" / "mayring" / "ollama.conf"
+
+
+def _resolve_ollama_url(job_url: str = "") -> str:
+    """Determine the Ollama URL for a single job execution.
+
+    Three layers of override, highest priority first — every layer can be
+    changed at runtime (no restart needed):
+
+      1. **Per-job:** `job_url` — caller explicitly chose a backend at submit
+         time (`pi_task_start(..., ollama_url="https://three.linn.games")`).
+      2. **Runtime-mutable config file:** the first non-empty line of
+         `~/.config/mayring/ollama.conf` (or `$MAYRING_OLLAMA_CONFIG`). Read
+         fresh on every job, so `echo … > ollama.conf` flips backends mid-
+         session without restarting the MCP server.
+      3. **Process-start env:** `OLLAMA_URL` — set when the worker booted.
+      4. **Hard default:** `http://localhost:11434` (the worker's own GPU).
+
+    Empty / unreachable layers fall through to the next one. Nothing is
+    enforced — the worker honours the user's explicit choice. Tenant
+    scoping in the queue is the boundary; this resolver does not impose
+    a second one.
+    """
+    if job_url:
+        return job_url
+    config_path = Path(os.getenv("MAYRING_OLLAMA_CONFIG", str(_OLLAMA_CONFIG_FILE)))
+    if config_path.is_file():
+        try:
+            for line in config_path.read_text().splitlines():
+                value = line.strip()
+                if value and not value.startswith("#"):
+                    return value
+        except OSError:
+            pass
+    return os.getenv("OLLAMA_URL", "http://localhost:11434")
+
+
 def _resolve_executor() -> ThreadPoolExecutor:
     """Lazy-create a ThreadPoolExecutor; capacity comes from PI_ASYNC_WORKERS env."""
     global _executor
@@ -87,7 +124,10 @@ def _execute(job: PiJob, *, on_cloud_complete=None) -> None:
     """
     try:
         from src.agents.pi import run_task_with_memory
-        ollama = job.ollama_url or os.getenv("OLLAMA_URL", "http://localhost:11434")
+        # Resolve the Ollama URL for THIS execution. The caller can swap
+        # backends at runtime via three layers — see _resolve_ollama_url
+        # for the precedence rules.
+        ollama = _resolve_ollama_url(job.ollama_url)
         result = run_task_with_memory(
             task=job.task_text,
             ollama_url=ollama,
