@@ -240,20 +240,32 @@ def _cloud_loop(stop: threading.Event, poll_interval: float) -> None:
 
 
 def _ensure_schema() -> None:
-    """Run the idempotent migration on whichever DB the worker will read.
+    """Run the idempotent migration on the DB the worker will read.
 
-    pi_jobs uses `CACHE_DIR / memory.db` by default — distinct from
+    pi_jobs.claim_next/get_job default to MEMORY_DB_PATH — distinct from
     MAYRING_LOCAL_DB which local_mcp.py initialises. Without this call,
     the worker thread immediately hits "no such table: pi_jobs" because
     nothing has run init_memory_db() against that path. Idempotent: a
     fully-migrated DB short-circuits in milliseconds.
+
+    The DB path is imported from src.memory.store as the single source of
+    truth — nothing here hardcodes the location.
+
+    Errors are narrowed to sqlite3.Error (corrupt / unwritable DB) and
+    OSError (permissions, disk full). We re-raise so a fresh-install
+    misconfiguration surfaces at startup, not 1s later as a confusing
+    "no such table" inside the loop.
     """
+    import sqlite3
+    from src.memory.store import MEMORY_DB_PATH, init_memory_db
     try:
-        from src.config import CACHE_DIR
-        from src.memory.store import init_memory_db
-        init_memory_db(CACHE_DIR / "memory.db").close()
-    except Exception:
-        logger.exception("pi_worker: schema init failed (worker will likely error on claim_next)")
+        init_memory_db(MEMORY_DB_PATH).close()
+    except (sqlite3.Error, OSError):
+        logger.exception(
+            "pi_worker: schema init failed at %s — fix the DB path or "
+            "permissions and restart the MCP server", MEMORY_DB_PATH,
+        )
+        raise
 
 
 def start(
