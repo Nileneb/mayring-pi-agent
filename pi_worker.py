@@ -5,10 +5,11 @@ Runs as a daemon thread spawned at import time by `local_mcp.py`. Two modes:
 - LOCAL (default): polls `pi_jobs` table directly, claims `scope='local'`
   rows with `claim_next()`, runs `run_task_with_memory()` in the
   ThreadPoolExecutor.
-- CLOUD (opt-in via PI_CLOUD_POLLING=1): in addition to local, calls the
-  cloud MCP `pi_task_claim_cloud` over HTTP with the persistent worker_id
-  and the configured capabilities. Successfully claimed cloud jobs run the
-  same way as local; result is reported back via `pi_task_complete_cloud`.
+- CLOUD (default ON, opt out via PI_CLOUD_POLLING=false): in addition to
+  local, calls the cloud MCP `pi_task_claim_cloud` over HTTP with the
+  persistent worker_id and the configured capabilities. Successfully
+  claimed cloud jobs run the same way as local; result is reported back
+  via `pi_task_complete_cloud`.
 
 A single `start()` guard prevents double-starting the loop when the module
 is imported multiple times.
@@ -165,8 +166,9 @@ def _loop(stop: threading.Event, poll_interval: float) -> None:
 def _cloud_loop(stop: threading.Event, poll_interval: float) -> None:
     """CLOUD polling loop. Calls cloud MCP via HTTP to claim jobs.
 
-    Activated only when PI_CLOUD_POLLING=1. Reads MAYRING_API_URL +
-    hook.jwt for auth — same pattern as the postcompact + memory_sync hooks.
+    Active by default; opt out via PI_CLOUD_POLLING=false. Reads
+    MAYRING_API_URL + hook.jwt for auth — same pattern as the postcompact
+    + memory_sync hooks.
     """
     api = os.getenv("MAYRING_API_URL", "https://mcp.linn.games").rstrip("/")
     jwt_path = os.getenv("MAYRING_HOOK_JWT") or str(
@@ -275,8 +277,8 @@ def start(
 ) -> bool:
     """Start the worker loops once per process. Returns True on first start.
 
-    Always starts the LOCAL loop. Additionally starts the CLOUD loop when
-    PI_CLOUD_POLLING=1 and a hook JWT is available.
+    Always starts the LOCAL loop. CLOUD loop is on by default; opt out
+    with PI_CLOUD_POLLING=false. Cloud loop also requires a hook JWT.
     """
     global _started, _stop_event, _loop_thread, _cloud_thread
     with _lock:
@@ -295,7 +297,12 @@ def start(
             daemon=True,
         )
         _loop_thread.start()
-        if os.getenv("PI_CLOUD_POLLING", "").lower() in ("1", "true", "yes"):
+        # Cloud-queue polling default ON. The pi-worker container exists
+        # specifically to drain the cloud pi_jobs queue — if we leave it
+        # off, every `pi_task_submit_cloud` call enqueues forever. Local
+        # dev (no cloud queue / no MAYRING_API_URL) opts out via
+        # PI_CLOUD_POLLING=false.
+        if os.getenv("PI_CLOUD_POLLING", "true").lower() not in ("0", "false", "no"):
             _cloud_thread = threading.Thread(
                 target=_cloud_loop,
                 args=(_stop_event, cloud_poll_interval),
