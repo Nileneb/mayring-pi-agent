@@ -20,7 +20,7 @@ _FALLBACK_MODEL = "qwen3:latest"
 
 def _model() -> str:
     from src.model_router import ModelRouter
-    resolved = ModelRouter(_OLLAMA_URL).resolve("analysis")
+    resolved = ModelRouter(_OLLAMA_URL).resolve("text")
     if not resolved:
         print(f"  [Pi] WARN: ModelRouter returned nothing — falling back to {_FALLBACK_MODEL}", flush=True)
         return _FALLBACK_MODEL
