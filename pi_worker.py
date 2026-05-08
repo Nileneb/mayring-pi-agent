@@ -125,14 +125,23 @@ def _execute(job: PiJob, *, on_cloud_complete=None) -> None:
     """
     try:
         from src.agents.pi import run_task_with_memory
+        from src.model_router import ModelRouter
         # Resolve the Ollama URL for THIS execution. The caller can swap
         # backends at runtime via three layers — see _resolve_ollama_url
         # for the precedence rules.
         ollama = _resolve_ollama_url(job.ollama_url)
+        # Issue #88: ModelRouter is the only allowed model resolution path.
+        # Reading OLLAMA_MODEL from env bypasses /stats/admin/model-routes
+        # overrides so users can no longer change the model at runtime.
+        chosen_model = (
+            job.model
+            or ModelRouter(ollama).resolve("text")
+            or "qwen2.5-coder:7b"
+        )
         result = run_task_with_memory(
             task=job.task_text,
             ollama_url=ollama,
-            model=job.model or os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b"),
+            model=chosen_model,
             repo_slug=job.repo_slug or None,
             timeout=job.timeout_s,
         )
