@@ -14,7 +14,9 @@ The handler is async: `Callable[[PiJob], Awaitable[dict]]`.
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
+import time as _time
 from typing import Awaitable, Callable
 
 from src.agents.pi_jobs import PiJob
@@ -23,6 +25,7 @@ _log = logging.getLogger(__name__)
 
 _HandlerType = Callable[[PiJob], Awaitable[dict]]
 _DEFAULT_CONCURRENCY = 2
+_STATS_BUFFER_SIZE = 200
 
 
 class PiQueue:
@@ -35,6 +38,8 @@ class PiQueue:
         self._workers: list[asyncio.Task] = []
         self._shutdown_event = asyncio.Event()
         self._pending_futures: set[asyncio.Future] = set()
+        self._completed_buffer: collections.deque = collections.deque(maxlen=_STATS_BUFFER_SIZE)
+        self._in_flight: int = 0
 
     def set_handler(self, handler: _HandlerType) -> None:
         """Inject the worker logic. Must be called before `start()`."""
@@ -74,15 +79,27 @@ class PiQueue:
             if fut.cancelled():
                 self._queue.task_done()
                 continue
+            self._in_flight += 1
+            start = _time.monotonic()
             try:
                 assert self._handler is not None
                 result = await self._handler(job)
+                job.latency_ms = int((_time.monotonic() - start) * 1000)
                 if not fut.done():
                     fut.set_result(result)
             except Exception as exc:
+                job.latency_ms = int((_time.monotonic() - start) * 1000)
                 if not fut.done():
                     fut.set_exception(exc)
             finally:
+                self._in_flight -= 1
+                self._completed_buffer.append({
+                    "job_class": job.job_class,
+                    "kind": job.kind,
+                    "latency_ms": job.latency_ms,
+                    "model_used": job.model_used,
+                    "model_requested": job.model,
+                })
                 self._queue.task_done()
 
     async def shutdown(self, timeout: float = 5.0) -> None:
@@ -95,6 +112,34 @@ class PiQueue:
             w.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers = []
+
+    def stats(self) -> dict:
+        """Return {in_flight, completed_total, by_class}."""
+        by_class: dict = {}
+        for entry in self._completed_buffer:
+            cls = entry["job_class"]
+            bucket = by_class.setdefault(cls, {"count": 0, "latencies": [], "fallbacks": 0})
+            bucket["count"] += 1
+            bucket["latencies"].append(entry["latency_ms"])
+            if entry["model_requested"] and entry["model_used"] != entry["model_requested"]:
+                bucket["fallbacks"] += 1
+        out: dict = {}
+        for cls, b in by_class.items():
+            lat = sorted(b["latencies"])
+            n = len(lat)
+            p50 = lat[n // 2] if n else 0
+            p95 = lat[min(n - 1, max(0, int(n * 0.95)))] if n else 0
+            out[cls] = {
+                "count": b["count"],
+                "p50_ms": p50,
+                "p95_ms": p95,
+                "fallback_rate": round(b["fallbacks"] / b["count"], 3) if b["count"] else 0.0,
+            }
+        return {
+            "in_flight": self._in_flight,
+            "completed_total": len(self._completed_buffer),
+            "by_class": out,
+        }
 
 
 _SINGLETON: PiQueue | None = None
