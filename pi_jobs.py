@@ -54,12 +54,48 @@ class PiJob:
     created_at: str = ""
     started_at: str = ""
     finished_at: str = ""
+    # T1 (#183): in-process queue extension fields.
+    # WHY(#183): kind discriminates pi-task vs duel vs pipeline so the
+    # same queue handles all three with shared logging/stats. job_class
+    # routes to size-appropriate model + timeout. system_prompt feeds
+    # classify_pi_job. model_used logs what Ollama actually got vs the
+    # request hint. latency_ms persists for /pi-jobs/stats p50/p95.
+    kind: str = "pi-task"
+    job_class: str = "standard"
+    system_prompt: str = ""
+    model_used: str = ""
+    latency_ms: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         d = self.__dict__.copy()
         # Decode result_json into a real object for callers
         d["result"] = _safe_json_load(self.result_json) if self.result_json else None
         return d
+
+
+def classify_pi_job(
+    task: str,
+    system_prompt: str = "",
+    *,
+    kind_hint: str = "",
+) -> str:
+    """Heuristic classifier — token-length proxy via char-count.
+
+    Issue #183 spec section 1: 'mini' (<2s expected), 'standard' (<60s),
+    'test' (anti-gaming probe). 'test' is opt-in via kind_hint='test';
+    never auto-classified to avoid false-positive on short legitimate
+    queries that resemble probes. Char-count is a coarse proxy for
+    token-count (≈4 chars/token avg), avoids tokenizer-import overhead.
+
+    The 500-char boundary corresponds to ~125 tokens — most one-shot
+    LLM-calls below that finish in <2s on local Ollama with 7B models.
+    """
+    if kind_hint == "test":
+        return "test"
+    total_chars = len(task or "") + len(system_prompt or "")
+    if total_chars < 500:
+        return "mini"
+    return "standard"
 
 
 def _now_iso() -> str:
@@ -353,6 +389,7 @@ def list_recent(
 
 
 def _row_to_job(row: sqlite3.Row) -> PiJob:
+    keys = row.keys()
     return PiJob(
         job_id=row["job_id"],
         task_text=row["task_text"],
@@ -372,6 +409,11 @@ def _row_to_job(row: sqlite3.Row) -> PiJob:
         created_at=row["created_at"],
         started_at=row["started_at"] or "",
         finished_at=row["finished_at"] or "",
+        kind=row["kind"] if "kind" in keys else "pi-task",
+        job_class=row["job_class"] if "job_class" in keys else "standard",
+        system_prompt=row["system_prompt"] if "system_prompt" in keys else "",
+        model_used=row["model_used"] if "model_used" in keys else "",
+        latency_ms=int(row["latency_ms"]) if "latency_ms" in keys and row["latency_ms"] is not None else 0,
     )
 
 
@@ -380,6 +422,7 @@ __all__ = (
     "VALID_PREFER",
     "VALID_SCOPE",
     "VALID_STATUSES",
+    "classify_pi_job",
     "insert_job",
     "insert_cloud_job",
     "claim_next",
