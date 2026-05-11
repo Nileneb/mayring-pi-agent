@@ -96,52 +96,32 @@ _TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Schreibt Inhalt in eine Datei (überschreibt falls vorhanden)",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Absoluter oder relativer Pfad zur Datei"},
-                    "content": {"type": "string", "description": "Dateiinhalt"},
-                },
-                "required": ["path", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "bash",
-            "description": "Führt einen Shell-Befehl aus und gibt stdout+stderr zurück",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "Shell-Befehl"},
-                    "cwd": {"type": "string", "description": "Arbeitsverzeichnis (optional)"},
-                },
-                "required": ["command"],
-            },
-        },
-    },
+    # WHY(2026-05-11, SECURITY): write_file + bash ENTFERNT. Der Pi-Agent
+    # läuft server-side im mayring-pi container — write/exec-tools dort
+    # = jeder mit MCP-zugriff (pi_task) könnte auf dem prod-server files
+    # schreiben oder shell-commands ausführen. Pi-Agent ist jetzt
+    # READ-ONLY: search_memory / search_wiki / read_file.
+    # Writes + test-runs gehören CLIENT-SIDE (claude-code's Edit/Write,
+    # vom User kontrolliert) — der Pi-Agent analysiert nur, schreibt nie.
 ]
 
 _SYSTEM_PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "pi_system.md"
 
 _TASK_SYSTEM_PROMPT = """\
-Du bist Pi, ein intelligenter Coding-Agent mit Zugriff auf Dateisystem und Memory.
+Du bist Pi, ein READ-ONLY Analyse-Agent mit Zugriff auf Memory + Dateisystem-Lesezugriff.
 
-**Tools:**
+**Tools (alle read-only):**
 - search_memory: Projektkontext, Konventionen, bekannte Patterns abrufen
 - search_wiki: Thematisch verwandte Dateien finden
 - read_file: Datei lesen (absoluter Pfad bevorzugt)
-- write_file: Datei schreiben/überschreiben
-- bash: Shell-Befehl ausführen (git, tests, grep, ls, etc.)
 
-**Workflow für Code-Tasks:** search_memory → read_file → write_file → bash (Tests/Commit)
-**Grundsatz:** Implementiere direkt. Maximal 10 Tool-Aufrufe pro Task."""
+**Wichtig:** Du kannst KEINE Dateien schreiben und KEINE shell-commands ausführen
+— du läufst server-side, write/exec wären ein security-risiko. Für Code-Tasks:
+gib die vorgeschlagene Änderung als text oder unified-diff zurück. Der Orchestrator
+(claude-code, client-side) wendet sie an + führt tests aus.
+
+**Workflow für Code-Tasks:** search_memory → read_file → vorgeschlagene Änderung als diff/text ausgeben.
+**Grundsatz:** Analysiere gründlich, schlage konkret vor. Maximal 10 Tool-Aufrufe pro Task."""
 
 
 def _load_system_prompt() -> str:
@@ -483,33 +463,18 @@ def _agent_loop(
                     print(f"    [Pi] read_file({str(p):.50}) → {len(content)} chars", flush=True)
                 except Exception as exc:
                     result_text = f"read_file Fehler: {exc}"
-            elif func_name == "write_file":
-                try:
-                    p = Path(args.get("path", "")).expanduser()
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_text(args.get("content", ""), encoding="utf-8")
-                    result_text = f"OK: {p} geschrieben ({len(args.get('content', ''))} Zeichen)"
-                    print(f"    [Pi] write_file({str(p):.50})", flush=True)
-                except Exception as exc:
-                    result_text = f"write_file Fehler: {exc}"
-            elif func_name == "bash":
-                import subprocess
-                try:
-                    proc = subprocess.run(
-                        args.get("command", ""),
-                        shell=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=60,
-                        cwd=args.get("cwd") or None,
-                    )
-                    out = (proc.stdout + proc.stderr)[:4000]
-                    result_text = f"exit={proc.returncode}\n{out}"
-                    print(f"    [Pi] bash({args.get('command', ''):.50}) → exit={proc.returncode}", flush=True)
-                except subprocess.TimeoutExpired:
-                    result_text = "bash Timeout (60s)"
-                except Exception as exc:
-                    result_text = f"bash Fehler: {exc}"
+            elif func_name in ("write_file", "bash"):
+                # WHY(2026-05-11, SECURITY): server-side write/exec entfernt.
+                # Falls ein altes model-prompt diese tools noch ruft (cache,
+                # stale system-prompt) → explizit ablehnen statt ausführen.
+                result_text = (
+                    f"{func_name} ist server-side DEAKTIVIERT — der Pi-Agent "
+                    "ist read-only. File-writes + test-runs gehören client-side "
+                    "(claude-code Edit/Write/Bash, vom User kontrolliert). "
+                    "Gib stattdessen die vorgeschlagene Änderung als text/diff "
+                    "zurück, damit der Orchestrator sie client-side anwendet."
+                )
+                print(f"    [Pi] {func_name} BLOCKED (server-side read-only)", flush=True)
             else:
                 result_text = f"Unbekanntes Tool: {func_name}"
 
