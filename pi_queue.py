@@ -29,7 +29,12 @@ from src.agents.pi_jobs import PiJob
 _log = logging.getLogger(__name__)
 
 _HandlerType = Callable[[PiJob], Awaitable[dict]]
-_DEFAULT_CONCURRENCY = 2
+# WHY(#192, asymmetric-routing): default lane sizes vor 2026-05-11 waren
+# 2/2/1 (priority/standard/background) — bei drei parallelen subagents
+# bottleneckte das. Neue defaults 4/4/2 = 10 slots total. OLLAMA_NUM_PARALLEL
+# auf three.linn.games muss ≥4 sein damit das nicht in Ollama-seitige
+# sequentialisierung läuft (siehe issue #192).
+_DEFAULT_CONCURRENCY = 4
 _STATS_BUFFER_SIZE = 200
 
 _BACKGROUND_KINDS = frozenset({"ingest", "classify"})
@@ -235,12 +240,18 @@ _SINGLETON: PiQueue | None = None
 
 
 def get_pi_queue() -> PiQueue:
-    """Return process-singleton PiQueue with 3-lane routing."""
+    """Return process-singleton PiQueue with 3-lane routing.
+
+    WHY(#192): Defaults bumped (priority 2→4, background 1→2) damit
+    parallele subagent-runs nicht hinter dem standard-lane stauen. Override
+    per env wenn Ollama-server kleiner ist — bei OLLAMA_NUM_PARALLEL<4
+    sinken die defaults auf das ollama-cap herab (siehe issue #192).
+    """
     global _SINGLETON
     if _SINGLETON is None:
-        prio = int(os.getenv("PI_PRIORITY_CONCURRENCY", "2"))
+        prio = int(os.getenv("PI_PRIORITY_CONCURRENCY", "4"))
         std = int(os.getenv("PI_STANDARD_CONCURRENCY",
                             os.getenv("PI_CONCURRENCY", str(_DEFAULT_CONCURRENCY))))
-        bg = int(os.getenv("PI_BACKGROUND_CONCURRENCY", "1"))
+        bg = int(os.getenv("PI_BACKGROUND_CONCURRENCY", "2"))
         _SINGLETON = PiQueue.with_lanes(priority=prio, standard=std, background=bg)
     return _SINGLETON
