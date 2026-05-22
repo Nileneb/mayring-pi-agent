@@ -115,7 +115,7 @@ def run(
     url = ollama_url or os.environ.get("OLLAMA_URL", "http://localhost:11434")
     if not model:
         try:
-            from src.model_router import ModelRouter
+            from mayring_core.model_router import ModelRouter
             model = ModelRouter(url).resolve("text") or "qwen2.5-coder:7b"
         except Exception:
             model = os.environ.get("MAYRING_DIFF_MODEL", "qwen2.5-coder:7b")

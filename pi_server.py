@@ -19,7 +19,7 @@ _OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 _FALLBACK_MODEL = "qwen3:latest"
 
 def _model() -> str:
-    from src.model_router import ModelRouter
+    from mayring_core.model_router import ModelRouter
     resolved = ModelRouter(_OLLAMA_URL).resolve("text")
     if not resolved:
         print(f"  [Pi] WARN: ModelRouter returned nothing — falling back to {_FALLBACK_MODEL}", flush=True)

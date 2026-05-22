@@ -79,7 +79,7 @@ def caption_image(
         raw_bytes = path.read_bytes()
         b64_data = base64.b64encode(raw_bytes).decode("ascii")
 
-        from src.ollama_client import generate as _oc_generate
+        from mayring_core.ollama_client import generate as _oc_generate
         return _oc_generate(
             ollama_url, model, _CAPTION_PROMPT,
             images=[b64_data],

@@ -125,7 +125,7 @@ def _execute(job: PiJob, *, on_cloud_complete=None) -> None:
     """
     try:
         from src.agents.pi import run_task_with_memory
-        from src.model_router import ModelRouter
+        from mayring_core.model_router import ModelRouter
         # Resolve the Ollama URL for THIS execution. The caller can swap
         # backends at runtime via three layers — see _resolve_ollama_url
         # for the precedence rules.
@@ -259,7 +259,7 @@ def _ensure_schema() -> None:
     nothing has run init_memory_db() against that path. Idempotent: a
     fully-migrated DB short-circuits in milliseconds.
 
-    The DB path is imported from src.memory.store as the single source of
+    The DB path is imported from mayring_core.memory.store as the single source of
     truth — nothing here hardcodes the location.
 
     Errors are narrowed to sqlite3.Error (corrupt / unwritable DB) and
@@ -268,7 +268,7 @@ def _ensure_schema() -> None:
     "no such table" inside the loop.
     """
     import sqlite3
-    from src.memory.store import MEMORY_DB_PATH, init_memory_db
+    from mayring_core.memory.store import MEMORY_DB_PATH, init_memory_db
     try:
         init_memory_db(MEMORY_DB_PATH).close()
     except (sqlite3.Error, OSError):

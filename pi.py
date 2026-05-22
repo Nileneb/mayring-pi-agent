@@ -20,7 +20,7 @@ _MEMORY_JWT_FILE = os.path.expanduser(
 )
 
 if TYPE_CHECKING:
-    from src.llm.endpoint import LLMEndpoint
+    from mayring_core.llm.endpoint import LLMEndpoint
 
 
 def _resolve_ollama_compatible(endpoint: "LLMEndpoint") -> tuple[str, str]:
@@ -34,7 +34,7 @@ def _resolve_ollama_compatible(endpoint: "LLMEndpoint") -> tuple[str, str]:
     if endpoint.provider not in ("ollama", "platform", "openai"):
         raise NotImplementedError(
             f"pi.py tool-calling loop does not support provider={endpoint.provider!r}. "
-            "Use src.llm.dispatch.generate() for anthropic or other non-Ollama providers."
+            "Use mayring_core.llm.dispatch.generate() for anthropic or other non-Ollama providers."
         )
     return endpoint.base_url, endpoint.model
 
@@ -131,18 +131,18 @@ def _load_system_prompt() -> str:
 
 
 try:
-    from src.memory.retrieval import compress_for_prompt, search  # type: ignore
+    from mayring_core.memory.retrieval import compress_for_prompt, search  # type: ignore
 except ImportError:
     search = None  # type: ignore
     compress_for_prompt = None  # type: ignore
 
 try:
-    from src.memory.store import init_memory_db  # type: ignore
+    from mayring_core.memory.store import init_memory_db  # type: ignore
 except ImportError:
     init_memory_db = None  # type: ignore
 
 try:
-    from src.memory.ingest import get_or_create_chroma_collection  # type: ignore
+    from mayring_core.memory.ingest import get_or_create_chroma_collection  # type: ignore
 except ImportError:
     get_or_create_chroma_collection = None  # type: ignore
 
@@ -233,7 +233,7 @@ def _execute_search_memory(
     _search = search
     _compress = compress_for_prompt
     if _search is None or _compress is None:
-        from src.memory.retrieval import compress_for_prompt as _compress, search as _search  # type: ignore
+        from mayring_core.memory.retrieval import compress_for_prompt as _compress, search as _search  # type: ignore
 
     opts: dict = {"top_k": top_k, "include_text": True}
     if repo_slug:
@@ -276,7 +276,7 @@ def _execute_search_wiki(args: dict, repo_slug_hint: str = "") -> str:
     safe_slug = _sanitize_repo_slug_for_filename(str(slug)) if slug else ""
     if safe_slug:
         try:
-            from src.config import CACHE_DIR
+            from mayring_core.config import CACHE_DIR
             from src.wiki_v2.graph import WikiGraph
             db = WikiGraph(safe_slug, safe_slug, CACHE_DIR / "wiki_v2.db")
             if db.node_count() > 0:
@@ -389,7 +389,7 @@ def _agent_loop(
         if tool_calls_made < max_tool_calls:
             request_body["tools"] = _TOOLS
 
-        from src.ollama_client import chat as _oc_chat
+        from mayring_core.ollama_client import chat as _oc_chat
         data = _oc_chat(
             ollama_url, model, messages,
             system=system_prompt,
@@ -405,7 +405,7 @@ def _agent_loop(
         # No tool calls → final response
         if not tool_calls or tool_calls_made >= max_tool_calls:
             try:
-                from src.memory.store import log_llm_call
+                from mayring_core.memory.store import log_llm_call
                 _dur = int((time.perf_counter() - _start) * 1000)
                 _prompt_text = messages[0].get("content", "") if messages else ""
                 log_llm_call(
@@ -522,10 +522,10 @@ def analyze_with_memory(
 
     _init_db = init_memory_db
     if _init_db is None:
-        from src.memory.store import init_memory_db as _init_db  # type: ignore
+        from mayring_core.memory.store import init_memory_db as _init_db  # type: ignore
     _get_chroma = get_or_create_chroma_collection
     if _get_chroma is None:
-        from src.memory.ingest import get_or_create_chroma_collection as _get_chroma  # type: ignore
+        from mayring_core.memory.ingest import get_or_create_chroma_collection as _get_chroma  # type: ignore
 
     filename = file.get("filename", "?")
     content = file.get("content", "")
@@ -642,10 +642,10 @@ def run_task_with_memory(
 
     _init_db = init_memory_db
     if _init_db is None:
-        from src.memory.store import init_memory_db as _init_db  # type: ignore
+        from mayring_core.memory.store import init_memory_db as _init_db  # type: ignore
     _get_chroma = get_or_create_chroma_collection
     if _get_chroma is None:
-        from src.memory.ingest import get_or_create_chroma_collection as _get_chroma  # type: ignore
+        from mayring_core.memory.ingest import get_or_create_chroma_collection as _get_chroma  # type: ignore
 
     conn = _init_db()
     chroma = _get_chroma()
@@ -656,7 +656,7 @@ def run_task_with_memory(
     _trigger_ids: list[str] = []
     if not disable_memory:
         try:
-            from src.memory.ambient import build_context
+            from mayring_core.memory.ambient import build_context
             ambient_ctx = build_context(
                 task, conn, ollama_url, safe_repo_slug,
                 _out_trigger_ids=_trigger_ids,
@@ -692,7 +692,7 @@ def run_task_with_memory(
     # Implicit feedback — silent fail
     if ambient_ctx and _trigger_ids:
         try:
-            from src.memory.ambient import compute_feedback, update_trigger_stats
+            from mayring_core.memory.ambient import compute_feedback, update_trigger_stats
             _retrieval_happened = bool(ambient_ctx and "## Relevante Erinnerungen" in ambient_ctx)
             led_to_retrieval = tool_calls_made > 0 or _retrieval_happened
             fb = compute_feedback(ambient_ctx, content, _trigger_ids, led_to_retrieval, conn, ollama_url)

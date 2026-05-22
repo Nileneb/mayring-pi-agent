@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.config import CACHE_DIR
+from mayring_core.config import CACHE_DIR
 
 VALID_STATUSES = ("queued", "running", "completed", "failed")
 VALID_PREFER = ("auto", "local", "cloud")
