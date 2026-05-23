@@ -371,7 +371,10 @@ def _execute_search_wiki(args: dict, repo_slug_hint: str = "") -> str:
     if safe_slug:
         try:
             from mayring_core.config import CACHE_DIR
-            from src.wiki_v2.graph import WikiGraph
+            try:
+                from src.wiki_v2.graph import WikiGraph  # nur im MayringCoder-Monorepo
+            except ImportError:
+                return "search_wiki nicht verfügbar im standalone Pi-Service"
             db = WikiGraph(safe_slug, safe_slug, CACHE_DIR / "wiki_v2.db")
             if db.node_count() > 0:
                 clusters = db.get_clusters()
@@ -624,7 +627,10 @@ def analyze_with_memory(
     """
     if endpoint is not None:
         ollama_url, model = _resolve_ollama_compatible(endpoint)
-    from src.analysis.analyzer import _parse_llm_json
+    try:
+        from src.analysis.analyzer import _parse_llm_json
+    except ImportError:
+        from mayring_pi_agent.json_utils import parse_llm_json as _parse_llm_json
 
     _init_db = init_memory_db
     if _init_db is None:

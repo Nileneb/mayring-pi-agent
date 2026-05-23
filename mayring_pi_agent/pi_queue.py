@@ -24,7 +24,7 @@ import os
 import time as _time
 from typing import Awaitable, Callable
 
-from src.agents.pi_jobs import PiJob
+from mayring_pi_agent.pi_jobs import PiJob
 
 _log = logging.getLogger(__name__)
 

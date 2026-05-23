@@ -27,8 +27,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from src.agents import pi_jobs
-from src.agents.pi_jobs import PiJob
+from mayring_pi_agent import pi_jobs
+from mayring_pi_agent.pi_jobs import PiJob
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ def _execute(job: PiJob, *, on_cloud_complete=None) -> None:
     writing to the local mirror).
     """
     try:
-        from src.agents.pi import run_task_with_memory
+        from mayring_pi_agent.pi import run_task_with_memory
         from mayring_core.model_router import ModelRouter
         # Resolve the Ollama URL for THIS execution. The caller can swap
         # backends at runtime via three layers — see _resolve_ollama_url

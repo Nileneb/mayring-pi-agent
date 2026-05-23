@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mayring-pi-agent"
+version = "0.1.0"
+description = "Pi-Agent: read-only Ollama analysis microservice (extracted from MayringCoder #266)."
+requires-python = ">=3.10"
+dependencies = [
+    "httpx",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    # Shared core (memory/llm/identity/ollama_client/model_router). Lives in the
+    # MayringCoder repo under core/; resolved as a git-subdirectory dependency.
+    # Verfügbar sobald MayringCoder master das core/-Package enthält (PR #273).
+    "mayring-core @ git+https://github.com/Nileneb/MayringCoder.git@master#subdirectory=core",
+]
+
+[project.scripts]
+mayring-pi-agent = "mayring_pi_agent.pi_server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mayring_pi_agent*"]

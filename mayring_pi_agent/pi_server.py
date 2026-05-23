@@ -10,8 +10,8 @@ try:
 except ImportError as exc:
     raise ImportError("pip install fastapi uvicorn") from exc
 
-from src.agents.pi import run_task_with_memory
-from src.api.auth import get_token_info
+from mayring_pi_agent.pi import run_task_with_memory
+from mayring_pi_agent.auth import get_token_info
 
 app = FastAPI(title="MayringCoder Pi-Agent", version="1.0.0")
 
