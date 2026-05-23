@@ -50,7 +50,7 @@ pip install -e .
 
 **Cloud/Server (read-only + sandbox):**
 ```bash
-export OLLAMA_URL=http://three.linn.games:11434   # niemals Docker-Service ohne GPU
+export OLLAMA_URL=https://three.linn.games   # Reverse-Proxy, KEIN Port (niemals :11434). Lokal: http://localhost:11434
 export PI_WEB_FETCH_ALLOWLIST=docs.python.org,github.com   # web_fetch Allow-List
 export PI_FS_ROOT=/srv/repos                       # read_file-Sandbox (PFLICHT, sonst read_file deaktiviert)
 # JWT-Auth (RS256) — Public Key kommt von app.linn.games (dort liegt der Private Key):
