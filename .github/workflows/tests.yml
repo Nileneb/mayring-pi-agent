@@ -1,0 +1,26 @@
+name: tests
+
+# Gate für mayring-pi-agent (test_auth/test_pi_tools/test_json_utils — dual-mode,
+# FS-sandbox, web_fetch, json). Klar benannter Check "pi-agent: pytest" →
+# Komponenten-Attribution. `pip install -e .` zieht mayring-core (git-subdir auf
+# MayringCoder@master) → validiert implizit die core↔pi-agent-Boundary.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    name: "pi-agent: pytest"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e . pytest
+      - run: pytest tests/ -q
