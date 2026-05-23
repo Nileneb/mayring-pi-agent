@@ -5,8 +5,19 @@ Read-only Pi-Agent als eigenständiger Microservice — aus MayringCoder ausgela
 History via `git subtree split` erhalten.
 
 Der Pi-Agent kategorisiert/analysiert über lokales **Ollama** mit Tool-Calling
-(`search_memory`, `search_wiki`, `read_file`, `web_fetch`, `plan`) — **read-only**,
-keine file-writes / shell-execution (Security, MayringCoder PR #224).
+(`search_memory`, `search_wiki`, `read_file`, `web_fetch`, `plan`).
+
+**Zwei Deployment-Profile aus einem Paket** (gesteuert über Env-Flags, default-OFF):
+
+- **Cloud/Server** (mcp.linn.games, app.linn.games): **read-only + sandboxed**.
+  Keine write/exec-Flags → kein file-write, keine shell-execution; `read_file`
+  ist auf `PI_FS_ROOT` beschränkt (Security, MayringCoder PR #224).
+- **Lokaler Worker** (eigene Maschine + lokales Ollama): zieht Jobs aus der
+  Cloud-Queue und führt sie lokal aus. Schreibt/exekutiert NUR wenn explizit
+  per `PI_ALLOW_WRITE` / `PI_ALLOW_EXEC` aktiviert — beide sandboxed auf
+  `PI_FS_ROOT`. Die Worker-Capabilities (`write`/`exec`) werden aus denselben
+  Flags abgeleitet, damit die Queue keine write-Jobs an einen read-only-Worker
+  routet.
 
 ## Struktur
 
@@ -18,7 +29,7 @@ mayring_pi_agent/
 ├── pi_worker.py    # Worker-Coroutines
 ├── pi_server.py    # FastAPI-Service (Port 8091): POST /task, GET /health
 ├── vision.py       # Vision-Captioning (Pillow + Ollama)
-├── auth.py         # Bearer-Token-Gate (⚠ vor Prod: echte JWT-Validierung)
+├── auth.py         # RS256-JWT-Validierung (Contract: MayringCoder src/api/jwt_auth.py)
 └── json_utils.py   # lokaler LLM-JSON-Parser (Fallback für src.analysis)
 ```
 
@@ -37,17 +48,32 @@ pip install -e .
 
 ## Run
 
+**Cloud/Server (read-only + sandbox):**
 ```bash
 export OLLAMA_URL=http://three.linn.games:11434   # niemals Docker-Service ohne GPU
 export PI_WEB_FETCH_ALLOWLIST=docs.python.org,github.com   # web_fetch Allow-List
+export PI_FS_ROOT=/srv/repos                       # read_file-Sandbox (PFLICHT, sonst read_file deaktiviert)
+# JWT-Auth (RS256) — Public Key kommt von app.linn.games (dort liegt der Private Key):
+export JWT_PUBLIC_KEY_PATH=/etc/mayring/jwt_public.pem
+export JWT_ISSUER=https://app.linn.games           # default, überschreibbar
+export JWT_AUDIENCE=mayringcoder                   # default, überschreibbar
 mayring-pi-agent            # uvicorn auf :8091  (PI_PORT überschreibbar)
 # health: curl localhost:8091/health
 ```
 
+**Lokaler Worker (write-enabled):** zusätzlich
+```bash
+export PI_ALLOW_WRITE=1     # write_file in PI_FS_ROOT erlauben
+export PI_ALLOW_EXEC=1      # bash/Tests erlauben (separate, höhere Berechtigung)
+export PI_FS_ROOT=/         # oder ein Projekt-Root; Sandbox für write/read
+# Cloud-Polling nutzt ~/.config/mayring/hook.jwt (MCP-Login) → MAYRING_API_URL
+```
+
 ## Vor Production zu erledigen (Cutover, siehe MayringCoder docs/pi-agent-extraction-266.md)
 
-- [ ] `auth.py`: Bearer-Gate durch echte JWT-Validierung gegen das gemeinsame
-      MayringCoder-Secret ersetzen (Contract: `src/api/jwt_auth.py`).
+- [x] `auth.py`: echte RS256-JWT-Validierung gegen den MayringCoder-Contract
+      (`src/api/jwt_auth.py`). Public Key via `JWT_PUBLIC_KEY_PATH`.
+- [x] `read_file`-Sandbox (`PI_FS_ROOT`, fail-closed) + write/exec-Capability-Gates.
 - [ ] `search_wiki` / `analyze_with_memory`: optionale `src.wiki_v2` / `src.analysis`
       sind im Standalone-Service nicht vorhanden — entweder per HTTP gegen
       MayringCoder lösen oder als „nicht verfügbar" belassen (aktuell graceful).

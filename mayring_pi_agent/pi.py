@@ -74,6 +74,129 @@ def _execute_web_fetch(url: str) -> str:
     return body
 
 
+# ---------------------------------------------------------------------------
+# Filesystem capability gates (#224 follow-up — dual-mode deployment).
+#
+# WHY(SECURITY): the cloud/server deployment (mcp.linn.games, app.linn.games)
+# runs READ-ONLY + SANDBOXED — no env flags there, so write/exec stay off and
+# read_file is confined to PI_FS_ROOT. The SAME package run as a LOCAL worker
+# (user's own machine + local Ollama) opts in via PI_ALLOW_WRITE / PI_ALLOW_EXEC
+# so it can execute write-jobs pulled from the cloud queue. pi_worker derives
+# its advertised capabilities from these SAME flags, so the queue never routes
+# a write-job to a worker that would then reject it.
+_TRUE = ("1", "true", "yes", "on")
+
+_WRITE_DISABLED_MSG = (
+    "{name} ist DEAKTIVIERT — dieser Pi-Agent läuft read-only "
+    "(PI_ALLOW_WRITE/PI_ALLOW_EXEC nicht gesetzt). Auf Cloud/Server ist das "
+    "Absicht. Gib die vorgeschlagene Änderung als text/diff zurück, damit der "
+    "Orchestrator sie client-side anwendet."
+)
+
+
+def write_enabled() -> bool:
+    return os.environ.get("PI_ALLOW_WRITE", "").strip().lower() in _TRUE
+
+
+def exec_enabled() -> bool:
+    return os.environ.get("PI_ALLOW_EXEC", "").strip().lower() in _TRUE
+
+
+def _fs_roots() -> list[Path]:
+    """Allowed filesystem roots for read_file/write_file (PI_FS_ROOT).
+
+    Empty = deny-all (read_file/write_file refuse) — same fail-closed default
+    as the web_fetch allow-list. A local worker that wants unrestricted access
+    sets PI_FS_ROOT=/ explicitly.
+    """
+    roots: list[Path] = []
+    for part in os.environ.get("PI_FS_ROOT", "").split(os.pathsep):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            roots.append(Path(part).expanduser().resolve())
+        except OSError:
+            continue
+    return roots
+
+
+def _within_roots(p: Path, roots: list[Path]) -> bool:
+    # resolve() collapses .. and follows symlinks, so a path that escapes the
+    # root via either trick lands outside and is rejected.
+    try:
+        rp = p.expanduser().resolve()
+    except OSError:
+        return False
+    return any(rp == r or r in rp.parents for r in roots)
+
+
+def _execute_read_file(raw_path: str) -> str:
+    roots = _fs_roots()
+    if not roots:
+        return (
+            "read_file Fehler: keine Sandbox-Root konfiguriert — setze PI_FS_ROOT "
+            "(z.B. '/srv/repos'). Ohne Root ist read_file deaktiviert (fail-closed)."
+        )
+    if not raw_path:
+        return "read_file Fehler: leerer Pfad"
+    p = Path(raw_path)
+    if not _within_roots(p, roots):
+        return f"read_file Fehler: Pfad außerhalb der erlaubten Root(s) {[str(r) for r in roots]}"
+    try:
+        content = p.expanduser().resolve().read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return f"read_file Fehler: {exc}"
+    return content[:8000] + ("\n[abgeschnitten]" if len(content) > 8000 else "")
+
+
+def _execute_write_file(raw_path: str, content: str) -> str:
+    if not write_enabled():
+        return _WRITE_DISABLED_MSG.format(name="write_file")
+    roots = _fs_roots()
+    if not roots:
+        return (
+            "write_file Fehler: keine Sandbox-Root konfiguriert — setze PI_FS_ROOT. "
+            "Ohne Root ist write_file deaktiviert (fail-closed)."
+        )
+    if not raw_path:
+        return "write_file Fehler: leerer Pfad"
+    p = Path(raw_path)
+    if not _within_roots(p, roots):
+        return f"write_file Fehler: Pfad außerhalb der erlaubten Root(s) {[str(r) for r in roots]}"
+    try:
+        target = p.expanduser().resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    except Exception as exc:
+        return f"write_file Fehler: {exc}"
+    return f"OK: {target} geschrieben ({len(content)} Zeichen)"
+
+
+def _execute_bash(command: str, cwd: str = "") -> str:
+    if not exec_enabled():
+        return _WRITE_DISABLED_MSG.format(name="bash")
+    if not command:
+        return "bash Fehler: leerer Befehl"
+    import subprocess
+
+    # WHY(SECURITY): cwd is NOT a sandbox — a shell command escapes any cwd.
+    # exec_enabled() (PI_ALLOW_EXEC, default OFF) is the real gate and is only
+    # ever set on a local, user-owned worker — never on the server.
+    roots = _fs_roots()
+    work = cwd or (str(roots[0]) if roots else None)
+    try:
+        proc = subprocess.run(
+            command, shell=True, capture_output=True, text=True, timeout=60, cwd=work,
+        )
+    except subprocess.TimeoutExpired:
+        return "bash Timeout (60s)"
+    except Exception as exc:
+        return f"bash Fehler: {exc}"
+    out = (proc.stdout + proc.stderr)[:4000]
+    return f"exit={proc.returncode}\n{out}"
+
+
 def _resolve_ollama_compatible(endpoint: "LLMEndpoint") -> tuple[str, str]:
     """Unpack an LLMEndpoint into (base_url, model) for the Ollama chat loop.
 
@@ -187,14 +310,57 @@ _TOOLS = [
             },
         },
     },
-    # WHY(2026-05-11, SECURITY): write_file + bash ENTFERNT. Der Pi-Agent
-    # läuft server-side im mayring-pi container — write/exec-tools dort
-    # = jeder mit MCP-zugriff (pi_task) könnte auf dem prod-server files
-    # schreiben oder shell-commands ausführen. Pi-Agent ist jetzt
-    # READ-ONLY: search_memory / search_wiki / read_file.
-    # Writes + test-runs gehören CLIENT-SIDE (claude-code's Edit/Write,
-    # vom User kontrolliert) — der Pi-Agent analysiert nur, schreibt nie.
 ]
+
+# WHY(#224 follow-up): write_file + bash are NOT in the read-only base above.
+# They are appended by _build_tools() ONLY when the env flags opt in, so the
+# cloud/server (no flags) never advertises them. Sandbox = PI_FS_ROOT.
+_WRITE_FILE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "write_file",
+        "description": "Schreibt Inhalt in eine Datei innerhalb der Sandbox-Root (PI_FS_ROOT)",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Pfad innerhalb PI_FS_ROOT"},
+                "content": {"type": "string", "description": "Dateiinhalt"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+}
+
+_BASH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Führt einen Shell-Befehl aus (Tests, git, etc.) — nur lokaler Worker",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell-Befehl"},
+                "cwd": {"type": "string", "description": "Arbeitsverzeichnis (optional)"},
+            },
+            "required": ["command"],
+        },
+    },
+}
+
+
+def _build_tools() -> list[dict]:
+    """Read-only tools always; write/exec tools only when the env flags opt in.
+
+    WHY: advertising a tool the handler would reject just wastes the model's
+    tool-budget. Gating the *definition* means cloud/server never even sees
+    write_file/bash.
+    """
+    tools = list(_TOOLS)
+    if write_enabled():
+        tools.append(_WRITE_FILE_TOOL)
+    if exec_enabled():
+        tools.append(_BASH_TOOL)
+    return tools
 
 _SYSTEM_PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "pi_system.md"
 
@@ -216,6 +382,24 @@ gib die vorgeschlagene Änderung als text oder unified-diff zurück. Der Orchest
 **Workflow für komplexe Tasks:** plan → search_memory/web_fetch → read_file →
 (bei Bedarf plan erneut zur Korrektur) → vorgeschlagene Änderung als diff/text.
 **Grundsatz:** Analysiere gründlich, schlage konkret vor."""
+
+
+def _task_system_prompt() -> str:
+    """Read-only base prompt; documents write/exec only when the flags opt in."""
+    extra: list[str] = []
+    if write_enabled():
+        extra.append("- write_file: Datei in der Sandbox-Root (PI_FS_ROOT) schreiben/überschreiben")
+    if exec_enabled():
+        extra.append("- bash: Shell-Befehl ausführen (Tests, git, etc.)")
+    if not extra:
+        return _TASK_SYSTEM_PROMPT
+    return (
+        _TASK_SYSTEM_PROMPT
+        + "\n\n**Zusätzlich aktiviert (lokaler Worker):**\n"
+        + "\n".join(extra)
+        + "\n→ Du DARFST hier Dateien schreiben/Befehle ausführen (Sandbox = PI_FS_ROOT). "
+        "Setze Änderungen direkt um und verifiziere mit bash, falls verfügbar."
+    )
 
 
 def _load_system_prompt() -> str:
@@ -484,7 +668,7 @@ def _agent_loop(
             },
         }
         if tool_calls_made < max_tool_calls:
-            request_body["tools"] = _TOOLS
+            request_body["tools"] = _build_tools()
 
         from mayring_core.ollama_client import chat as _oc_chat
         data = _oc_chat(
@@ -553,13 +737,8 @@ def _agent_loop(
                 topic = args.get("topic", "")
                 print(f"    [Pi] search_wiki({topic!r:.40}) → {len(result_text)} chars", flush=True)
             elif func_name == "read_file":
-                try:
-                    p = Path(args.get("path", "")).expanduser()
-                    content = p.read_text(encoding="utf-8", errors="replace")
-                    result_text = content[:8000] + ("\n[abgeschnitten]" if len(content) > 8000 else "")
-                    print(f"    [Pi] read_file({str(p):.50}) → {len(content)} chars", flush=True)
-                except Exception as exc:
-                    result_text = f"read_file Fehler: {exc}"
+                result_text = _execute_read_file(args.get("path", ""))
+                print(f"    [Pi] read_file({str(args.get('path', '')):.50}) → {len(result_text)} chars", flush=True)
             elif func_name == "web_fetch":
                 url = args.get("url", "")
                 result_text = _execute_web_fetch(url)
@@ -572,18 +751,17 @@ def _agent_loop(
                 )
                 tool_calls_made += 1
                 print(f"    [Pi] plan({len(steps)} Schritte)", flush=True)
-            elif func_name in ("write_file", "bash"):
-                # WHY(2026-05-11, SECURITY): server-side write/exec entfernt.
-                # Falls ein altes model-prompt diese tools noch ruft (cache,
-                # stale system-prompt) → explizit ablehnen statt ausführen.
-                result_text = (
-                    f"{func_name} ist server-side DEAKTIVIERT — der Pi-Agent "
-                    "ist read-only. File-writes + test-runs gehören client-side "
-                    "(claude-code Edit/Write/Bash, vom User kontrolliert). "
-                    "Gib stattdessen die vorgeschlagene Änderung als text/diff "
-                    "zurück, damit der Orchestrator sie client-side anwendet."
-                )
-                print(f"    [Pi] {func_name} BLOCKED (server-side read-only)", flush=True)
+            elif func_name == "write_file":
+                # WHY(SECURITY): _execute_write_file self-gates on write_enabled()
+                # + PI_FS_ROOT — a stale prompt calling it on a read-only deploy
+                # gets the disabled message, never a write.
+                result_text = _execute_write_file(args.get("path", ""), args.get("content", ""))
+                tool_calls_made += 1
+                print(f"    [Pi] write_file({str(args.get('path', '')):.50}) → {result_text[:40]}", flush=True)
+            elif func_name == "bash":
+                result_text = _execute_bash(args.get("command", ""), args.get("cwd", ""))
+                tool_calls_made += 1
+                print(f"    [Pi] bash({str(args.get('command', '')):.50})", flush=True)
             else:
                 result_text = f"Unbekanntes Tool: {func_name}"
 
@@ -778,7 +956,7 @@ def run_task_with_memory(
             pass
 
     _effective_max_tool_calls = 0 if disable_memory else max_tool_calls
-    _system = (system_prompt or _TASK_SYSTEM_PROMPT) + (f"\n\n{ambient_ctx}" if ambient_ctx else "")
+    _system = (system_prompt or _task_system_prompt()) + (f"\n\n{ambient_ctx}" if ambient_ctx else "")
 
     content = ""
     tool_calls_made = 0

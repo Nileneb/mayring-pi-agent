@@ -111,9 +111,16 @@ def _worker_id() -> str:
 
 def _capabilities() -> list[str]:
     raw = os.getenv("PI_WORKER_CAPABILITIES", "")
-    if raw.strip():
-        return [c.strip() for c in raw.split(",") if c.strip()]
-    return list(_DEFAULT_CAPABILITIES)
+    caps = [c.strip() for c in raw.split(",") if c.strip()] if raw.strip() else list(_DEFAULT_CAPABILITIES)
+    # WHY(SECURITY): advertised capabilities MUST match the tools the agent
+    # actually has, or the cloud routes a write/exec job to a worker that then
+    # rejects it. Derive from the SAME env flags that gate the tools in pi.py.
+    from mayring_pi_agent.pi import exec_enabled, write_enabled
+    if write_enabled() and "write" not in caps:
+        caps.append("write")
+    if exec_enabled() and "exec" not in caps:
+        caps.append("exec")
+    return caps
 
 
 def _execute(job: PiJob, *, on_cloud_complete=None) -> None:

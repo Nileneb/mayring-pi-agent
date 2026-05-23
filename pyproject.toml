@@ -12,11 +12,18 @@ dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "pydantic",
+    # RS256 JWT validation on /task (auth.py). cryptography is required by
+    # PyJWT for the RS256 algorithm — pin both as runtime deps.
+    "pyjwt>=2.8",
+    "cryptography",
     # Shared core (memory/llm/identity/ollama_client/model_router). Lives in the
     # MayringCoder repo under core/; resolved as a git-subdirectory dependency.
     # Verfügbar sobald MayringCoder master das core/-Package enthält (PR #273).
     "mayring-core @ git+https://github.com/Nileneb/MayringCoder.git@master#subdirectory=core",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest"]
 
 [project.scripts]
 mayring-pi-agent = "mayring_pi_agent.pi_server:main"
