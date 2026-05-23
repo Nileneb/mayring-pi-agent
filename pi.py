@@ -22,6 +22,57 @@ _MEMORY_JWT_FILE = os.path.expanduser(
 if TYPE_CHECKING:
     from mayring_core.llm.endpoint import LLMEndpoint
 
+# web_fetch tool (#211): READ-only GET, allow-listed, size-capped, cached.
+_WEB_FETCH_MAX_BYTES = 200_000
+_WEB_FETCH_TIMEOUT = 15.0
+_WEB_FETCH_CACHE: dict[str, str] = {}
+
+
+def _web_fetch_allowlist() -> list[str]:
+    """Domains the Pi-Agent may fetch. Empty = deny-all (must be configured).
+
+    WHY(#211, SECURITY): kein offener Web-Zugriff vom server-side Agent — nur
+    explizit per PI_WEB_FETCH_ALLOWLIST freigegebene Domains (komma-separiert).
+    """
+    raw = os.environ.get("PI_WEB_FETCH_ALLOWLIST", "")
+    return [d.strip().lower() for d in raw.split(",") if d.strip()]
+
+
+def _domain_allowed(url: str, allowlist: list[str]) -> bool:
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    return any(host == d or host.endswith("." + d) for d in allowlist)
+
+
+def _execute_web_fetch(url: str) -> str:
+    if not url.startswith(("http://", "https://")):
+        return "web_fetch Fehler: nur http(s)-URLs erlaubt"
+    allow = _web_fetch_allowlist()
+    if not allow:
+        return (
+            "web_fetch Fehler: keine Allow-List konfiguriert — setze "
+            "PI_WEB_FETCH_ALLOWLIST (z.B. 'docs.python.org,github.com')"
+        )
+    if not _domain_allowed(url, allow):
+        return f"web_fetch Fehler: Domain nicht in Allow-List {allow}"
+    if url in _WEB_FETCH_CACHE:
+        return _WEB_FETCH_CACHE[url]
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "mayring-pi-agent/1.0"})
+        with urllib.request.urlopen(req, timeout=_WEB_FETCH_TIMEOUT) as resp:
+            raw = resp.read(_WEB_FETCH_MAX_BYTES + 1)
+    except urllib.error.URLError as exc:
+        return f"web_fetch Fehler: {exc}"
+    except Exception as exc:
+        return f"web_fetch Fehler: {exc}"
+    body = raw[:_WEB_FETCH_MAX_BYTES].decode("utf-8", errors="replace")
+    if len(raw) > _WEB_FETCH_MAX_BYTES:
+        body += "\n[abgeschnitten bei 200kB]"
+    _WEB_FETCH_CACHE[url] = body
+    return body
+
 
 def _resolve_ollama_compatible(endpoint: "LLMEndpoint") -> tuple[str, str]:
     """Unpack an LLMEndpoint into (base_url, model) for the Ollama chat loop.
@@ -96,6 +147,46 @@ _TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": (
+                "Lädt den Text-Inhalt einer http(s)-URL (READ-only GET). Nur "
+                "Domains aus der Allow-List (PI_WEB_FETCH_ALLOWLIST). Body wird "
+                "bei 200kB abgeschnitten, Ergebnisse werden gecacht."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Vollständige http(s)-URL"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "plan",
+            "description": (
+                "Notiere oder revidiere einen mehrstufigen Plan für komplexe "
+                "Tasks. Rufe dies zu Beginn auf und erneut, wenn ein Tool-Ergebnis "
+                "zeigt, dass der Plan angepasst werden muss (Replan)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Geordnete Schritte",
+                    },
+                },
+                "required": ["steps"],
+            },
+        },
+    },
     # WHY(2026-05-11, SECURITY): write_file + bash ENTFERNT. Der Pi-Agent
     # läuft server-side im mayring-pi container — write/exec-tools dort
     # = jeder mit MCP-zugriff (pi_task) könnte auf dem prod-server files
@@ -114,14 +205,17 @@ Du bist Pi, ein READ-ONLY Analyse-Agent mit Zugriff auf Memory + Dateisystem-Les
 - search_memory: Projektkontext, Konventionen, bekannte Patterns abrufen
 - search_wiki: Thematisch verwandte Dateien finden
 - read_file: Datei lesen (absoluter Pfad bevorzugt)
+- web_fetch: Text-Inhalt einer erlaubten http(s)-URL laden (nur Allow-List-Domains)
+- plan: mehrstufigen Plan notieren/revidieren (zu Beginn + bei Replan)
 
 **Wichtig:** Du kannst KEINE Dateien schreiben und KEINE shell-commands ausführen
 — du läufst server-side, write/exec wären ein security-risiko. Für Code-Tasks:
 gib die vorgeschlagene Änderung als text oder unified-diff zurück. Der Orchestrator
 (claude-code, client-side) wendet sie an + führt tests aus.
 
-**Workflow für Code-Tasks:** search_memory → read_file → vorgeschlagene Änderung als diff/text ausgeben.
-**Grundsatz:** Analysiere gründlich, schlage konkret vor. Maximal 10 Tool-Aufrufe pro Task."""
+**Workflow für komplexe Tasks:** plan → search_memory/web_fetch → read_file →
+(bei Bedarf plan erneut zur Korrektur) → vorgeschlagene Änderung als diff/text.
+**Grundsatz:** Analysiere gründlich, schlage konkret vor."""
 
 
 def _load_system_prompt() -> str:
@@ -463,6 +557,18 @@ def _agent_loop(
                     print(f"    [Pi] read_file({str(p):.50}) → {len(content)} chars", flush=True)
                 except Exception as exc:
                     result_text = f"read_file Fehler: {exc}"
+            elif func_name == "web_fetch":
+                url = args.get("url", "")
+                result_text = _execute_web_fetch(url)
+                tool_calls_made += 1
+                print(f"    [Pi] web_fetch({url!r:.50}) → {len(result_text)} chars", flush=True)
+            elif func_name == "plan":
+                steps = args.get("steps", []) or []
+                result_text = "Plan notiert:\n" + "\n".join(
+                    f"{i + 1}. {s}" for i, s in enumerate(steps)
+                )
+                tool_calls_made += 1
+                print(f"    [Pi] plan({len(steps)} Schritte)", flush=True)
             elif func_name in ("write_file", "bash"):
                 # WHY(2026-05-11, SECURITY): server-side write/exec entfernt.
                 # Falls ein altes model-prompt diese tools noch ruft (cache,
