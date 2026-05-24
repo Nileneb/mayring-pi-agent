@@ -179,6 +179,67 @@ def _loop(stop: threading.Event, poll_interval: float) -> None:
         executor.submit(_execute, job)
 
 
+def _claim_one(
+    *,
+    slots: threading.Semaphore,
+    post_fn,
+    submit_fn,
+    worker_id: str,
+    caps: list[str],
+    on_complete,
+    idle_wait,
+) -> str:
+    """One bounded claim attempt. Returns 'busy' | 'empty' | 'dispatched'.
+
+    WHY(prod-outage 2026-05-24): the old loop claimed a job and immediately
+    looped to claim the next with NO pacing — so a backlog was drained at full
+    HTTP speed, flooding /pi_task_claim_cloud AND firing unbounded concurrent
+    job callbacks at the single-core API → CPU pegged, every other request
+    (memory hooks) starved. We now gate each claim on a free worker slot:
+    concurrency is capped at the executor size and the claim rate can never
+    outrun job completion. The slot is released by the wrapped completion
+    callback (or eagerly on busy/empty/submit-failure) so it can't leak.
+    """
+    if not slots.acquire(blocking=False):
+        idle_wait()
+        return "busy"
+    resp = post_fn(
+        "/pi_task_claim_cloud",
+        {"worker_id": worker_id, "capabilities": caps},
+    )
+    if resp is None or not resp.get("job"):
+        slots.release()
+        idle_wait()
+        return "empty"
+    cj = resp["job"]
+    job = PiJob(
+        job_id=cj["job_id"],
+        task_text=cj["task_text"],
+        repo_slug=cj.get("repo_slug", ""),
+        ollama_url=cj.get("ollama_url", ""),
+        model=cj.get("model", ""),
+        timeout_s=float(cj.get("timeout_s", 180.0)),
+        scope="cloud",
+        capability_required=cj.get("capability_required", ""),
+        claimed_by=worker_id,
+        claimed_at=cj.get("claimed_at", ""),
+        status="running",
+    )
+
+    def _release_after(job_id, result, error):
+        try:
+            on_complete(job_id, result, error)
+        finally:
+            slots.release()
+
+    try:
+        submit_fn(_execute, job, on_cloud_complete=_release_after)
+    except Exception:
+        slots.release()
+        raise
+    return "dispatched"
+
+
 def _cloud_loop(stop: threading.Event, poll_interval: float) -> None:
     """CLOUD polling loop. Calls cloud MCP via HTTP to claim jobs.
 
@@ -232,29 +293,18 @@ def _cloud_loop(stop: threading.Event, poll_interval: float) -> None:
             body["result"] = result
         _post("/pi_task_complete_cloud", body)
 
+    capacity = max(1, int(os.getenv("PI_ASYNC_WORKERS", str(_DEFAULT_MAX_WORKERS))))
+    slots = threading.Semaphore(capacity)
     while not stop.is_set():
-        resp = _post(
-            "/pi_task_claim_cloud",
-            {"worker_id": worker_id, "capabilities": caps},
+        _claim_one(
+            slots=slots,
+            post_fn=_post,
+            submit_fn=executor.submit,
+            worker_id=worker_id,
+            caps=caps,
+            on_complete=_on_cloud_complete,
+            idle_wait=lambda: stop.wait(poll_interval),
         )
-        if resp is None or not resp.get("job"):
-            stop.wait(poll_interval)
-            continue
-        cj = resp["job"]
-        job = PiJob(
-            job_id=cj["job_id"],
-            task_text=cj["task_text"],
-            repo_slug=cj.get("repo_slug", ""),
-            ollama_url=cj.get("ollama_url", ""),
-            model=cj.get("model", ""),
-            timeout_s=float(cj.get("timeout_s", 180.0)),
-            scope="cloud",
-            capability_required=cj.get("capability_required", ""),
-            claimed_by=worker_id,
-            claimed_at=cj.get("claimed_at", ""),
-            status="running",
-        )
-        executor.submit(_execute, job, on_cloud_complete=_on_cloud_complete)
 
 
 def _ensure_schema() -> None:
