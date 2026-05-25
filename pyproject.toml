@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mayring-pi-agent"
-version = "0.1.2"
+version = "0.1.3"
 description = "Pi-Agent: dual-mode (read-only cloud / sandboxed-write local) Ollama analysis microservice (extracted from MayringCoder #266)."
 requires-python = ">=3.10"
 dependencies = [
@@ -16,10 +16,10 @@ dependencies = [
     # PyJWT for the RS256 algorithm — pin both as runtime deps.
     "pyjwt>=2.8",
     "cryptography",
-    # Shared core (memory/llm/identity/ollama_client/model_router). Lives in the
-    # MayringCoder repo under core/; resolved as a git-subdirectory dependency.
-    # Verfügbar sobald MayringCoder master das core/-Package enthält (PR #273).
-    "mayring-core @ git+https://github.com/Nileneb/MayringCoder.git@master#subdirectory=core",
+    # Shared core (memory/llm/identity/ollama_client/model_router). Eigenes Repo
+    # seit #267 — bricht den MayringCoder<->pi-agent-Zyklus (kein MayringCoder-Clone
+    # mehr nötig). Pin auf Tag, damit Image-Builds reproduzierbar sind.
+    "mayring-core @ git+https://github.com/Nileneb/mayring-core.git@v0.1.0",
 ]
 
 [project.optional-dependencies]
