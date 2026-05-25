@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mayring-pi-agent"
-version = "0.1.1"
+version = "0.1.2"
 description = "Pi-Agent: dual-mode (read-only cloud / sandboxed-write local) Ollama analysis microservice (extracted from MayringCoder #266)."
 requires-python = ">=3.10"
 dependencies = [
