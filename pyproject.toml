@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mayring-pi-agent"
-version = "0.1.3"
+version = "0.1.4"
 description = "Pi-Agent: dual-mode (read-only cloud / sandboxed-write local) Ollama analysis microservice (extracted from MayringCoder #266)."
 requires-python = ">=3.10"
 dependencies = [
@@ -19,7 +19,7 @@ dependencies = [
     # Shared core (memory/llm/identity/ollama_client/model_router). Eigenes Repo
     # seit #267 — bricht den MayringCoder<->pi-agent-Zyklus (kein MayringCoder-Clone
     # mehr nötig). Pin auf Tag, damit Image-Builds reproduzierbar sind.
-    "mayring-core @ git+https://github.com/Nileneb/mayring-core.git@v0.1.0",
+    "mayring-core @ git+https://github.com/Nileneb/mayring-core.git@v0.1.2",
 ]
 
 [project.optional-dependencies]
