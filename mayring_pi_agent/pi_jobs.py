@@ -65,6 +65,11 @@ class PiJob:
     system_prompt: str = ""
     model_used: str = ""
     latency_ms: int = 0
+    # WHY(2026-05-28, central-queue): carries Ollama's `format` (e.g. "json")
+    # from the /pi/run entry through the queue to the generate() call, so the
+    # JSON-mode pi_* tools route through the central queue instead of hitting
+    # Ollama directly. Empty = free-text. Transient only (not DB-persisted).
+    response_format: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d = self.__dict__.copy()
