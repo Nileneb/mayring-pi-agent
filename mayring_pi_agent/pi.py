@@ -41,6 +41,8 @@ def _web_fetch_allowlist() -> list[str]:
 
 def _domain_allowed(url: str, allowlist: list[str]) -> bool:
     from urllib.parse import urlparse
+    if "*" in allowlist:  # local research worker opts into unrestricted fetch
+        return url.startswith(("http://", "https://"))
     host = (urlparse(url).hostname or "").lower()
     if not host:
         return False

@@ -29,6 +29,11 @@ def test_web_search_returns_formatted_results(monkeypatch):
     assert "Agent2Agent protocol" in out
 
 
+def test_web_fetch_allowlist_wildcard_allows_any_domain():
+    assert pi._domain_allowed("https://anything.example.com/x", ["*"]) is True
+    assert pi._domain_allowed("https://anything.example.com/x", ["github.com"]) is False
+
+
 def test_ingest_posts_to_cloud_and_reports_ok(monkeypatch):
     monkeypatch.setenv("MAYRING_API_URL", "https://mcp.linn.games")
     captured = {}

@@ -409,4 +409,26 @@ def _is_running() -> bool:
     return _started
 
 
-__all__ = ("start", "stop", "_is_running")
+def main() -> None:
+    """Run the worker as a foreground process (systemd / `python -m`).
+
+    start() spawns daemon threads, so block here until interrupted.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    start()
+    logger.info("pi_worker: foreground run — caps=%s, worker_id=%s", _capabilities(), _worker_id())
+    forever = threading.Event()
+    try:
+        forever.wait()
+    except KeyboardInterrupt:
+        stop()
+
+
+__all__ = ("start", "stop", "main", "_is_running")
+
+
+if __name__ == "__main__":
+    main()

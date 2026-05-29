@@ -1,0 +1,29 @@
+# MayringCoder Research Worker (A2A cloud-pull)
+# Install:  cp deploy/mayring-research-worker.service ~/.config/systemd/user/
+#           systemctl --user daemon-reload
+#           systemctl --user enable --now mayring-research-worker
+# Logs:     journalctl --user -u mayring-research-worker -f
+#
+# Pulls cloud pi_jobs with capability_required="research" (only this worker
+# claims them — Prod-Pi stays untouched). Model comes from the job (qwen3.5:9b,
+# set by the cloud A2A gateway), so PI_WORKER_MODEL is intentionally NOT set.
+
+[Unit]
+Description=MayringCoder Research Worker (A2A cloud-pull)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=MAYRING_API_URL=https://mcp.linn.games
+Environment=OLLAMA_URL=http://localhost:11434
+Environment=PI_WORKER_CAPABILITIES=research
+Environment=PI_NUM_PREDICT=6000
+# WHY: local research worker needs unrestricted fetch (NOT for the prod Pi).
+Environment=PI_WEB_FETCH_ALLOWLIST=*
+Environment=PI_CLOUD_POLLING=true
+ExecStart=%h/miniconda3/bin/python -m mayring_pi_agent.pi_worker
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
