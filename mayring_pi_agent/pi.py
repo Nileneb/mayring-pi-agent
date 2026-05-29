@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -72,6 +73,69 @@ def _execute_web_fetch(url: str) -> str:
         body += "\n[abgeschnitten bei 200kB]"
     _WEB_FETCH_CACHE[url] = body
     return body
+
+
+def _read_jwt() -> str:
+    """DRY helper — same JWT as _cloud_search (Path(_MEMORY_JWT_FILE).read_text())."""
+    try:
+        return Path(_MEMORY_JWT_FILE).read_text().strip()
+    except Exception:
+        return ""
+
+
+_SEARXNG_TIMEOUT = float(os.getenv("PI_WEB_SEARCH_TIMEOUT", "20"))
+_SEARXNG_MAX_RESULTS = int(os.getenv("PI_WEB_SEARCH_MAX_RESULTS", "8"))
+
+
+def _searxng_url() -> str:
+    api = os.getenv("MAYRING_API_URL", "https://mcp.linn.games").rstrip("/")
+    return f"{api}/searxng/search"
+
+
+def _execute_web_search(query: str) -> str:
+    if not query.strip():
+        return "web_search Fehler: leere Query"
+    params = urllib.parse.urlencode({"q": query, "format": "json"})
+    url = f"{_searxng_url()}?{params}"
+    headers = {"User-Agent": "mayring-pi-agent/1.0"}
+    token = _read_jwt()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=_SEARXNG_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except Exception as exc:
+        return f"web_search Fehler: {exc}"
+    results = (data.get("results") or [])[:_SEARXNG_MAX_RESULTS]
+    if not results:
+        return f"web_search: keine Treffer für {query!r}"
+    lines = []
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r.get('title', '')}\n   {r.get('url', '')}\n   {r.get('content', '')}")
+    return "\n".join(lines)
+
+
+def _execute_ingest(title: str, text: str) -> str:
+    if not text.strip():
+        return "ingest Fehler: leerer Text"
+    api = os.getenv("MAYRING_API_URL", "https://mcp.linn.games").rstrip("/")
+    body = json.dumps({
+        "text": text,
+        "source_id": f"research:{title}"[:200],
+        "source_type": "knowledge",
+    }).encode()
+    headers = {"Content-Type": "application/json", "User-Agent": "mayring-pi-agent/1.0"}
+    token = _read_jwt()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        req = urllib.request.Request(f"{api}/ingest", data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+    except Exception as exc:
+        return f"ingest Fehler: {exc}"
+    return f"ingest ok: '{title}' ins Memory geschrieben"
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +349,41 @@ _TOOLS = [
                     "url": {"type": "string", "description": "Vollständige http(s)-URL"},
                 },
                 "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Durchsucht das Web (SearXNG) und liefert Top-Treffer als "
+                "Titel + URL + Snippet. Danach mit web_fetch die beste URL laden."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Suchbegriff"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ingest",
+            "description": (
+                "Schreibt ein Recherche-Ergebnis dauerhaft ins Memory (durchsuchbar). "
+                "Nutze dies am Ende, um wichtige Findings zu sichern."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Kurzer Titel"},
+                    "text": {"type": "string", "description": "Der zu speichernde Inhalt"},
+                },
+                "required": ["title", "text"],
             },
         },
     },
@@ -764,6 +863,14 @@ def _agent_loop(
                 result_text = _execute_web_fetch(url)
                 tool_calls_made += 1
                 print(f"    [Pi] web_fetch({url!r:.50}) → {len(result_text)} chars", flush=True)
+            elif func_name == "web_search":
+                q = args.get("query", "")
+                result_text = _execute_web_search(q)
+                tool_calls_made += 1
+                print(f"    [Pi] web_search({q!r:.50}) → {len(result_text)} chars", flush=True)
+            elif func_name == "ingest":
+                result_text = _execute_ingest(args.get("title", ""), args.get("text", ""))
+                print(f"    [Pi] ingest({str(args.get('title', '')):.40}) → {result_text[:60]}", flush=True)
             elif func_name == "plan":
                 steps = args.get("steps", []) or []
                 result_text = "Plan notiert:\n" + "\n".join(
