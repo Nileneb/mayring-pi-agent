@@ -70,6 +70,11 @@ class PiJob:
     # JSON-mode pi_* tools route through the central queue instead of hitting
     # Ollama directly. Empty = free-text. Transient only (not DB-persisted).
     response_format: str = ""
+    # WHY(2026-05-29, central-queue): Ollama generate-options (temperature, seed, …)
+    # durch die zentrale Queue tragen, damit der Determinismus der Mayring-Reduktion
+    # (temperature=0 + fixer seed) ERHALTEN bleibt, wenn categorize über /pi/run statt
+    # direkt generiert. None = Ollama-Defaults. Transient (nicht DB-persistiert).
+    options: dict | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = self.__dict__.copy()
