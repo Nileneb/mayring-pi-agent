@@ -69,8 +69,18 @@ async def task(req: TaskRequest, _: object = Depends(get_token_info)) -> TaskRes
     return TaskResponse(result=result)
 
 
+def _register_a2a() -> None:
+    if os.getenv("PI_A2A_ENABLED", "1") != "1":
+        return
+    from mayring_pi_agent.a2a_agent import register_a2a
+
+    base_url = os.getenv("PI_BASE_URL", f"http://localhost:{_PORT}")
+    register_a2a(app, base_url=base_url, model=_model(), ollama_url=_OLLAMA_URL)
+
+
 def main() -> None:
     import uvicorn
+    _register_a2a()
     uvicorn.run(app, host="0.0.0.0", port=_PORT)
 
 

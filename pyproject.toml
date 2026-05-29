@@ -20,6 +20,9 @@ dependencies = [
     # seit #267 — bricht den MayringCoder<->pi-agent-Zyklus (kein MayringCoder-Clone
     # mehr nötig). Pin auf Tag, damit Image-Builds reproduzierbar sind.
     "mayring-core @ git+https://github.com/Nileneb/mayring-core.git@v0.1.2",
+    # A2A protocol wrapper (a2a_agent.py): expose the Pi-Agent as a standard
+    # Agent2Agent server so non-plugin platforms (Langdock) can discover + call it.
+    "a2a-sdk>=1.1.0",
 ]
 
 [project.optional-dependencies]
