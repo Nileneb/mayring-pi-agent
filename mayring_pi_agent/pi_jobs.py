@@ -152,13 +152,14 @@ def _do_insert(
     scope: str,
     capability_required: str,
     db_path: Path | None,
+    job_id: str | None = None,
 ) -> PiJob:
     if prefer not in VALID_PREFER:
         raise ValueError(f"prefer must be one of {VALID_PREFER}, got {prefer!r}")
     if scope not in VALID_SCOPE:
         raise ValueError(f"scope must be one of {VALID_SCOPE}, got {scope!r}")
     job = PiJob(
-        job_id=_new_job_id(),
+        job_id=job_id or _new_job_id(),
         task_text=task_text,
         repo_slug=repo_slug,
         workspace_id=workspace_id,
@@ -219,16 +220,21 @@ def insert_cloud_job(
     timeout_s: float = 180.0,
     capability_required: str = "",
     db_path: Path | None = None,
+    job_id: str | None = None,
 ) -> PiJob:
     """Insert a CLOUD-routable job (Phase 2 path).
 
     `capability_required` is a comma-separated whitelist; an empty string
     matches any worker. Workers claim with `claim_cloud_next()`.
+
+    `job_id` lets a caller pin the id (e.g. the A2A relay sets it to the A2A
+    task_id so polling tasks/get maps straight to the job).
     """
     return _do_insert(
         task_text=task_text, repo_slug=repo_slug, workspace_id=workspace_id,
         prefer=prefer, ollama_url=ollama_url, model=model, timeout_s=timeout_s,
         scope="cloud", capability_required=capability_required, db_path=db_path,
+        job_id=job_id,
     )
 
 

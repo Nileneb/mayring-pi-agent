@@ -22,6 +22,14 @@ def test_fail_stale_cloud_jobs_marks_old_queued(tmp_path):
     assert pi_jobs.get_job(j.job_id, db_path=db).status == "failed"
 
 
+def test_insert_cloud_job_honours_explicit_job_id(tmp_path):
+    db = _init_db(tmp_path / "jobs.db")
+    j = pi_jobs.insert_cloud_job("x", capability_required="research",
+                                 job_id="a2a-task-123", db_path=db)
+    assert j.job_id == "a2a-task-123"
+    assert pi_jobs.get_job("a2a-task-123", db_path=db).task_text == "x"
+
+
 def test_fail_stale_cloud_jobs_keeps_fresh(tmp_path):
     db = _init_db(tmp_path / "jobs.db")
     j = pi_jobs.insert_cloud_job("frisch", capability_required="research", db_path=db)
