@@ -468,11 +468,13 @@ _SYSTEM_PROMPT_PATH = Path(__file__).parent.parent.parent / "prompts" / "pi_syst
 _TASK_SYSTEM_PROMPT = """\
 Du bist Pi, ein READ-ONLY Analyse-Agent mit Zugriff auf Memory + Dateisystem-Lesezugriff.
 
-**Tools (alle read-only):**
+**Tools:**
 - search_memory: Projektkontext, Konventionen, bekannte Patterns abrufen
 - search_wiki: Thematisch verwandte Dateien finden
 - read_file: Datei lesen (absoluter Pfad bevorzugt)
-- web_fetch: Text-Inhalt einer erlaubten http(s)-URL laden (nur Allow-List-Domains)
+- web_search: Das Web durchsuchen (SearXNG) → Titel + URL + Snippet. Für aktuelle/externe Infos.
+- web_fetch: Text-Inhalt einer http(s)-URL laden (nach web_search die beste URL öffnen)
+- ingest: Wichtige Recherche-Findings dauerhaft ins Memory schreiben (am Ende)
 - plan: mehrstufigen Plan notieren/revidieren (zu Beginn + bei Replan)
 
 **Wichtig:** Du kannst KEINE Dateien schreiben und KEINE shell-commands ausführen
@@ -480,9 +482,10 @@ Du bist Pi, ein READ-ONLY Analyse-Agent mit Zugriff auf Memory + Dateisystem-Les
 gib die vorgeschlagene Änderung als text oder unified-diff zurück. Der Orchestrator
 (claude-code, client-side) wendet sie an + führt tests aus.
 
-**Workflow für komplexe Tasks:** plan → search_memory/web_fetch → read_file →
-(bei Bedarf plan erneut zur Korrektur) → vorgeschlagene Änderung als diff/text.
-**Grundsatz:** Analysiere gründlich, schlage konkret vor."""
+**Workflow für Recherche-Tasks:** plan → web_search (Treffer finden) → web_fetch
+(beste URLs lesen) → search_memory (eigenes Wissen) → Synthese → ingest (Findings sichern).
+**Grundsatz:** Analysiere gründlich, nutze web_search aktiv für externe/aktuelle Fragen,
+schlage konkret vor."""
 
 
 def _task_system_prompt() -> str:
