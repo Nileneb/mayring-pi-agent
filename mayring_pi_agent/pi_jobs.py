@@ -23,7 +23,7 @@ import secrets
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -324,6 +324,26 @@ def complete_job(job_id: str, result: Any, *, db_path: Path | None = None) -> No
         conn.close()
 
 
+def fail_stale_cloud_jobs(max_age_s: float = 1800, *, db_path: Path | None = None) -> int:
+    """Fail queued cloud jobs older than max_age_s (no worker claimed them in time).
+
+    Keeps an A2A client from polling forever when no research worker is online.
+    Returns the number of jobs failed.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max_age_s)).isoformat()
+    conn = _conn(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE pi_jobs SET status='failed', error='ttl: no worker claimed in time', "
+            "finished_at=? WHERE status='queued' AND scope='cloud' AND created_at < ?",
+            (_now_iso(), cutoff),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def fail_job(job_id: str, error: str, *, db_path: Path | None = None) -> None:
     """Mark a job failed with a short error string."""
     conn = _conn(db_path)
@@ -439,6 +459,7 @@ __all__ = (
     "claim_cloud_next",
     "complete_job",
     "fail_job",
+    "fail_stale_cloud_jobs",
     "get_job",
     "list_recent",
 )

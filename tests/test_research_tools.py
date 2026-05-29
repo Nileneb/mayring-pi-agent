@@ -1,7 +1,33 @@
 import json
+import sqlite3
 from unittest.mock import patch
 
-from mayring_pi_agent import pi
+from mayring_pi_agent import pi, pi_jobs
+
+
+def _init_db(path):
+    from mayring_core.memory.store import init_memory_db
+    init_memory_db(path).close()
+    return path
+
+
+def test_fail_stale_cloud_jobs_marks_old_queued(tmp_path):
+    db = _init_db(tmp_path / "jobs.db")
+    j = pi_jobs.insert_cloud_job("alt", capability_required="research", db_path=db)
+    with sqlite3.connect(db) as c:
+        c.execute("UPDATE pi_jobs SET created_at=? WHERE job_id=?",
+                  ("2000-01-01T00:00:00+00:00", j.job_id))
+    n = pi_jobs.fail_stale_cloud_jobs(max_age_s=600, db_path=db)
+    assert n == 1
+    assert pi_jobs.get_job(j.job_id, db_path=db).status == "failed"
+
+
+def test_fail_stale_cloud_jobs_keeps_fresh(tmp_path):
+    db = _init_db(tmp_path / "jobs.db")
+    j = pi_jobs.insert_cloud_job("frisch", capability_required="research", db_path=db)
+    n = pi_jobs.fail_stale_cloud_jobs(max_age_s=600, db_path=db)
+    assert n == 0
+    assert pi_jobs.get_job(j.job_id, db_path=db).status == "queued"
 
 
 def test_web_search_returns_formatted_results(monkeypatch):
