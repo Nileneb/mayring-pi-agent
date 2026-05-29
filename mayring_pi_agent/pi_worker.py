@@ -285,6 +285,17 @@ def _cloud_loop(stop: threading.Event, poll_interval: float) -> None:
         except (urllib.error.URLError, json.JSONDecodeError, OSError):
             return None
 
+    # Self-register so the registry's capabilities match what we advertise.
+    # WHY(research-relay): effective_capabilities() lets the REGISTRY win over the
+    # claim body — a stale registration (e.g. an old run that registered ['local-gpu'])
+    # silently gates every claim, so the worker polls forever without ever matching
+    # a capability_required job. Re-registering on startup keeps registry == caps.
+    if _post("/devices/register", {"device_id": worker_id, "capabilities": caps}) is None:
+        logger.warning(
+            "pi_worker: device self-register failed — claims may be gated by stale "
+            "registry caps until /devices/register succeeds",
+        )
+
     def _on_cloud_complete(job_id: str, result, error) -> None:
         body = {"job_id": job_id}
         if error is not None:
