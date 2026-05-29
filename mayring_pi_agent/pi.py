@@ -431,11 +431,17 @@ def _cloud_search(
     repo: str | None,
     char_budget: int = 1800,
     timeout: float = 30.0,
+    session_id: str | None = None,
 ) -> str | None:
     """Hybrid memory search via the cloud API (server-side ChromaDB + SQLite).
 
     Returns formatted markdown context, "" if no results, or None if the cloud
     is unreachable (signalling the caller to try the local fallback).
+
+    ``session_id`` activates the server-side recency-lane: the controlling
+    session's rolling conversation thread is guaranteed into the results even
+    when semantic similarity is weak — so the worker sees the latest decisions
+    (e.g. a fix made minutes ago), not just topically-similar older chunks.
     """
     try:
         token = Path(_MEMORY_JWT_FILE).read_text().strip()
@@ -447,6 +453,8 @@ def _cloud_search(
     payload: dict[str, Any] = {"query": query, "top_k": top_k}
     if repo:
         payload["repo"] = repo
+    if session_id:
+        payload["session_id"] = session_id
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{_MEMORY_API_URL}/memory/search",
@@ -466,6 +474,15 @@ def _cloud_search(
     results = data.get("results") or []
     if not results:
         return ""
+
+    # Prioritise the session-recency thread within the (tight) char budget: the
+    # server guarantees it into top_k, but a strong semantic match can otherwise
+    # crowd it out of the formatted output before it reaches the model. Surface
+    # session-recency chunks first, then by score — so "what I'm doing now" lands.
+    results.sort(key=lambda r: (
+        0 if "session-recency" in (r.get("reasons") or []) else 1,
+        -float(r.get("score_final") or 0.0),
+    ))
 
     out: list[str] = []
     used = 0
@@ -495,6 +512,7 @@ def _execute_search_memory(
     chroma_collection: Any,
     ollama_url: str,
     repo_slug: str | None,
+    session_id: str | None = None,
 ) -> str:
     """Execute search_memory tool call — returns markdown context string.
 
@@ -504,7 +522,7 @@ def _execute_search_memory(
     `retrieval.search()` only if the cloud is unreachable AND a populated
     local Chroma collection is available — the legacy offline path.
     """
-    cloud_text = _cloud_search(query, top_k, repo_slug)
+    cloud_text = _cloud_search(query, top_k, repo_slug, session_id=session_id)
     if cloud_text is not None:
         return cloud_text or "Keine relevanten Memory-Einträge gefunden."
 
@@ -642,6 +660,7 @@ def _agent_loop(
     chroma: Any,
     repo_slug: str | None,
     num_predict: int = 1024,
+    session_id: str | None = None,
 ) -> tuple[str, int]:
     """Shared tool-calling loop.
 
@@ -728,6 +747,7 @@ def _agent_loop(
                     chroma_collection=chroma,
                     ollama_url=ollama_url,
                     repo_slug=repo_slug,
+                    session_id=session_id,
                 )
                 tool_calls_made += 1
                 print(f"    [Pi] search_memory({query!r:.40}) → {len(result_text)} chars", flush=True)
@@ -902,6 +922,8 @@ def run_task_with_memory(
     timeout: float = 180.0,
     endpoint: "LLMEndpoint | None" = None,
     disable_memory: bool = False,
+    session_id: str | None = None,
+    num_predict: int | None = None,
 ) -> str:
     """Run a free-form task using Pi agent with memory tool-calling.
 
@@ -956,6 +978,13 @@ def run_task_with_memory(
             pass
 
     _effective_max_tool_calls = 0 if disable_memory else max_tool_calls
+    # Token budget for reasoning: param > env (PI_NUM_PREDICT) > 2048 default.
+    # Stronger reasoners (Gemma) need room (≥4k) or they truncate mid-thought.
+    if num_predict is None:
+        try:
+            num_predict = int(os.environ.get("PI_NUM_PREDICT", "2048"))
+        except ValueError:
+            num_predict = 2048
     _system = (system_prompt or _task_system_prompt()) + (f"\n\n{ambient_ctx}" if ambient_ctx else "")
 
     content = ""
@@ -971,7 +1000,8 @@ def run_task_with_memory(
             conn=conn,
             chroma=chroma,
             repo_slug=safe_repo_slug,
-            num_predict=2048,
+            num_predict=num_predict,
+            session_id=session_id,
         )
     except Exception as exc:
         conn.close()
