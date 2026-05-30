@@ -122,6 +122,16 @@ def test_worker_capabilities_default(monkeypatch):
     assert "write" not in pi_worker._capabilities()
 
 
+def test_worker_capabilities_include_research(monkeypatch):
+    """The A2A research relay enqueues jobs with capability_required='research'.
+    web_search/web_fetch/ingest are always registered → every pi worker can do
+    research and MUST advertise it, else claim-matching gates the job forever."""
+    from mayring_pi_agent import pi_worker
+    assert "research" in pi_worker._capabilities()
+    monkeypatch.setenv("PI_WORKER_CAPABILITIES", "local-gpu")
+    assert "research" in pi_worker._capabilities()
+
+
 def test_worker_capabilities_with_write(monkeypatch):
     from mayring_pi_agent import pi_worker
     monkeypatch.setenv("PI_ALLOW_WRITE", "1")

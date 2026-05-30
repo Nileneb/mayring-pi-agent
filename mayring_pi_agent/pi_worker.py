@@ -120,6 +120,12 @@ def _capabilities() -> list[str]:
         caps.append("write")
     if exec_enabled() and "exec" not in caps:
         caps.append("exec")
+    # WHY(research-relay 2026-05-30): web_search/web_fetch/ingest are ALWAYS
+    # registered (unlike gated write/exec), so every pi worker can serve the A2A
+    # relay's capability_required="research" jobs. Without advertising it, the
+    # registry caps (e.g. ["local-gpu"]) never match → jobs sit queued forever.
+    if "research" not in caps:
+        caps.append("research")
     return caps
 
 
