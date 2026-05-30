@@ -295,20 +295,20 @@ def claim_cloud_next(
     """
     if not worker_id:
         raise ValueError("worker_id required for cloud claim")
+    # WHY(tenancy-audit 2026-05-31): workspace_id is the tenant boundary. The old
+    # `else` branch claimed the oldest cloud job of ANY tenant when ws was falsy —
+    # a cross-tenant job-steal waiting for the first caller (cron/test/lib) that
+    # forgets to pass it. Fail loud instead of silently dropping the scope.
+    if not workspace_id:
+        raise ValueError("workspace_id required for cloud claim (tenant boundary)")
     caps = list(capabilities or [])
     conn = _conn(db_path)
     try:
-        if workspace_id:
-            rows = conn.execute(
-                "SELECT * FROM pi_jobs WHERE status='queued' AND scope='cloud' "
-                "AND workspace_id=? ORDER BY created_at LIMIT 20",
-                (workspace_id,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM pi_jobs WHERE status='queued' AND scope='cloud' "
-                "ORDER BY created_at LIMIT 20",
-            ).fetchall()
+        rows = conn.execute(
+            "SELECT * FROM pi_jobs WHERE status='queued' AND scope='cloud' "
+            "AND workspace_id=? ORDER BY created_at LIMIT 20",
+            (workspace_id,),
+        ).fetchall()
         for r in rows:
             if not _capability_match(r["capability_required"] or "", caps):
                 continue
