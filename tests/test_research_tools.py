@@ -11,6 +11,21 @@ def _init_db(path):
     return path
 
 
+def test_pi_jobs_honours_mayring_local_db_env(tmp_path, monkeypatch):
+    # WHY(dual-DB footgun): the API (dependencies.get_conn) reads MAYRING_LOCAL_DB
+    # while pi_jobs._conn defaulted to CACHE_DIR/memory.db → in local-MCP mode they
+    # diverge (jobs written to one DB, read from another → empty dashboard).
+    db = _init_db(tmp_path / "env_local.db")
+    monkeypatch.setenv("MAYRING_LOCAL_DB", str(db))
+    j = pi_jobs.insert_job("via env", db_path=None)  # default path must follow the env
+    assert pi_jobs.get_job(j.job_id, db_path=None) is not None
+    # and the row really landed in the env DB, not CACHE_DIR
+    import sqlite3
+    n = sqlite3.connect(db).execute(
+        "SELECT COUNT(*) FROM pi_jobs WHERE job_id=?", (j.job_id,)).fetchone()[0]
+    assert n == 1
+
+
 def test_fail_stale_cloud_jobs_marks_old_queued(tmp_path):
     db = _init_db(tmp_path / "jobs.db")
     j = pi_jobs.insert_cloud_job("alt", capability_required="research", db_path=db)

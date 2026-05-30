@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import time
@@ -124,6 +125,19 @@ def _safe_json_load(s: str) -> Any:
         return s
 
 
+def _effective_db_path() -> Path:
+    """Single source of truth for the local pi_jobs DB path.
+
+    WHY(dual-DB footgun): local_mcp.py / the API set MAYRING_LOCAL_DB to the DB
+    they read (e.g. ~/.cache/mayringcoder/memory.db), but pi_jobs defaulted to
+    CACHE_DIR/memory.db — so in local-MCP mode jobs were written to one DB and
+    read from another (empty dashboard). Honour MAYRING_LOCAL_DB when set so all
+    local callers agree; fall back to CACHE_DIR otherwise (unchanged default).
+    """
+    env = os.getenv("MAYRING_LOCAL_DB")
+    return Path(env).expanduser() if env else (CACHE_DIR / "memory.db")
+
+
 def _conn(db_path: Path | None = None) -> sqlite3.Connection:
     """Lightweight per-call connection — pi_jobs operations are short.
 
@@ -131,7 +145,7 @@ def _conn(db_path: Path | None = None) -> sqlite3.Connection:
     and writes from the worker thread don't fight a long-lived sqlite
     handle that another module may have opened.
     """
-    p = db_path or (CACHE_DIR / "memory.db")
+    p = db_path or _effective_db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(p), check_same_thread=False, timeout=10.0)
     conn.row_factory = sqlite3.Row

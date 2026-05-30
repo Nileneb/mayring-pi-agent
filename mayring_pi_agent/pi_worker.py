@@ -336,13 +336,17 @@ def _ensure_schema() -> None:
     "no such table" inside the loop.
     """
     import sqlite3
-    from mayring_core.memory.store import MEMORY_DB_PATH, init_memory_db
+    from mayring_core.memory.store import init_memory_db
+    # WHY(dual-DB footgun): init the SAME DB pi_jobs reads/writes (honours
+    # MAYRING_LOCAL_DB) instead of the bare MEMORY_DB_PATH — otherwise in
+    # local-MCP mode the worker migrates one DB while claiming from another.
+    db_path = pi_jobs._effective_db_path()
     try:
-        init_memory_db(MEMORY_DB_PATH).close()
+        init_memory_db(db_path).close()
     except (sqlite3.Error, OSError):
         logger.exception(
             "pi_worker: schema init failed at %s — fix the DB path or "
-            "permissions and restart the MCP server", MEMORY_DB_PATH,
+            "permissions and restart the MCP server", db_path,
         )
         raise
 
