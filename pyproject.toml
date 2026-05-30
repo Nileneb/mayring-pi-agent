@@ -22,7 +22,9 @@ dependencies = [
     "mayring-core @ git+https://github.com/Nileneb/mayring-core.git@v0.1.2",
     # A2A protocol wrapper (a2a_agent.py): expose the Pi-Agent as a standard
     # Agent2Agent server so non-plugin platforms (Langdock) can discover + call it.
-    "a2a-sdk>=1.1.0",
+    # [http-server] extra pulls sse-starlette + starlette — a2a.server.routes
+    # imports sse_starlette at module load, so the bare package fails in clean CI.
+    "a2a-sdk[http-server]>=1.1.0",
 ]
 
 [project.optional-dependencies]
