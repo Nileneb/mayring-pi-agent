@@ -37,6 +37,23 @@ _DEFAULT_POLL_INTERVAL = 1.0
 _DEFAULT_CLOUD_POLL_INTERVAL = 5.0
 _DEFAULT_MAX_WORKERS = 2
 _DEFAULT_CAPABILITIES = ["local-gpu"]
+# Cap for the adaptive cloud-poll backoff (see _next_idle_delay).
+_DEFAULT_CLOUD_IDLE_MAX_INTERVAL = 30.0
+
+
+def _next_idle_delay(status: str, delay: float, base: float, cap: float) -> float:
+    """Adaptive cloud-poll backoff between claim attempts.
+
+    WHY(write-contention 2026-06-07): an idle (empty) cloud queue was polled every
+    `base` seconds forever. Each /pi_task_claim_cloud touches the shared memory.db
+    (device last_seen + claim attempt), so a steady idle poll across all workers fed a
+    constant write stream that serialized other writers (memory hooks) on the single
+    SQLite write lock. Back off exponentially while the queue stays empty (up to `cap`),
+    and reset to `base` the instant there is work ('dispatched') or capacity pressure
+    ('busy') so a backlog still drains promptly."""
+    if status == "empty":
+        return min(delay * 2.0, cap)
+    return base
 _WORKER_ID_FILE = Path.home() / ".config" / "mayring" / "worker_id"
 
 _lock = threading.Lock()
@@ -312,16 +329,22 @@ def _cloud_loop(stop: threading.Event, poll_interval: float) -> None:
 
     capacity = max(1, int(os.getenv("PI_ASYNC_WORKERS", str(_DEFAULT_MAX_WORKERS))))
     slots = threading.Semaphore(capacity)
+    # Adaptive backoff: an empty queue must not poll every `poll_interval` forever
+    # (idle write pressure on the shared DB — see _next_idle_delay). `delay` is mutable
+    # state the idle_wait closure reads; the loop adjusts it from each claim outcome.
+    cap = float(os.getenv("PI_CLOUD_IDLE_MAX_INTERVAL", str(_DEFAULT_CLOUD_IDLE_MAX_INTERVAL)))
+    delay = [poll_interval]
     while not stop.is_set():
-        _claim_one(
+        status = _claim_one(
             slots=slots,
             post_fn=_post,
             submit_fn=executor.submit,
             worker_id=worker_id,
             caps=caps,
             on_complete=_on_cloud_complete,
-            idle_wait=lambda: stop.wait(poll_interval),
+            idle_wait=lambda: stop.wait(delay[0]),
         )
+        delay[0] = _next_idle_delay(status, delay[0], poll_interval, cap)
 
 
 def _ensure_schema() -> None:

@@ -106,3 +106,18 @@ def test_submit_failure_releases_slot():
     except RuntimeError:
         pass
     assert slots.acquire(blocking=False) is True      # slot not leaked on submit failure
+
+
+def test_next_idle_delay_backoff_and_reset():
+    """Empty queue → exponential backoff capped; work/capacity → reset to base."""
+    base, cap = 5.0, 30.0
+    # consecutive empties escalate, capped at `cap`
+    d = base
+    d = pi_worker._next_idle_delay("empty", d, base, cap); assert d == 10.0
+    d = pi_worker._next_idle_delay("empty", d, base, cap); assert d == 20.0
+    d = pi_worker._next_idle_delay("empty", d, base, cap); assert d == 30.0  # capped
+    d = pi_worker._next_idle_delay("empty", d, base, cap); assert d == 30.0  # stays capped
+    # work resets immediately
+    assert pi_worker._next_idle_delay("dispatched", 30.0, base, cap) == base
+    # capacity pressure (busy) also resets so a freed slot polls promptly
+    assert pi_worker._next_idle_delay("busy", 30.0, base, cap) == base
