@@ -376,6 +376,27 @@ def _golden_once(*, post_fn, embed_fn, model: str) -> str:
     return "dispatched"
 
 
+def _gpu_idle(*, get_fn, idle_for: int) -> bool | None:
+    """Has the qwen text-route been idle for >= ``idle_for`` seconds?
+
+    True  -> idle, safe to run bge verification now.
+    False -> qwen busy, defer (real work has priority).
+    None  -> probe failed (endpoint unreachable / 403 without admin scope).
+
+    WHY(#365): verification is the LOWEST-priority GPU consumer. qwen is the VRAM
+    eviction victim (gemma ~9.6GB + bge ~0.65GB coexist in the 12GB VGPU; qwen ~2GB
+    is what gets pushed out), so qwen-idle is the correct, sufficient signal. On a
+    failed probe we DEFER (None handled as back-off by the caller): a missed round is
+    harmless (FP is optimistic, a late-found error is no drama) but evicting in-flight
+    qwen work is not. This is deliberately the OPPOSITE safe-default from the
+    /stats/gpu-idle endpoint itself, which degrades a dead signal to idle for
+    app.linn.games' cloud-escalation path."""
+    resp = get_fn(f"/stats/gpu-idle?idle_for={idle_for}")
+    if resp is None:
+        return None
+    return bool(resp.get("idle"))
+
+
 def _embed_auth_token() -> str:
     """Auth token for the embed-pool calls. Prefer MCP_SERVICE_TOKEN (resolves to the
     'system' workspace on the trusted u-server house-confirmer — where audit jobs live);
@@ -416,13 +437,38 @@ def _embed_loop(stop: threading.Event, poll_interval: float) -> None:
         except (urllib.error.URLError, json.JSONDecodeError, OSError):
             return None
 
+    def _get(path: str, timeout: float = 10.0) -> dict | None:
+        req = urllib.request.Request(
+            f"{api}{path}",
+            headers={"Authorization": f"Bearer {token}", "X-Device-Id": worker_id},
+            method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
+                return json.loads(resp.read())
+        except (urllib.error.URLError, json.JSONDecodeError, OSError):
+            return None
+
     def _embed_fn(text: str, model: str) -> list[float]:
         return embed_single(ollama, model, text)
 
     _post("/devices/register", {"device_id": worker_id, "capabilities": _capabilities()})
     delay = poll_interval
     cap = float(os.getenv("PI_EMBED_IDLE_MAX_INTERVAL", str(_DEFAULT_CLOUD_IDLE_MAX_INTERVAL)))
+    # Idle-gate (opt-in): when >0, only run verification once qwen has been idle for
+    # this many seconds. Set on the house-confirmer deploy (admin service token); left
+    # unset elsewhere so a per-user dev confirmer (no admin scope -> 403) never stalls.
+    idle_for = int(os.getenv("PI_EMBED_IDLE_FOR_SECONDS", "0"))
+    busy_wait = float(os.getenv("PI_EMBED_BUSY_WAIT_SECONDS", "60"))
     while not stop.is_set():
+        if idle_for > 0:
+            gate = _gpu_idle(get_fn=_get, idle_for=idle_for)
+            if gate is None:
+                logger.warning(
+                    "pi_worker: gpu-idle probe failed; deferring verification %ss (real work has priority)",
+                    busy_wait)
+            if gate is not True:
+                stop.wait(busy_wait)
+                continue
         status = _embed_once(post_fn=_post, embed_fn=_embed_fn, model=embed_model)
         if status == "empty":
             status = _golden_once(post_fn=_post, embed_fn=_embed_fn, model=embed_model)
