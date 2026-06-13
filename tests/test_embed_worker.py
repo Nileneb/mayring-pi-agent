@@ -29,8 +29,7 @@ def test_embed_once_claims_computes_completes():
         return [0.1, 0.2, 0.3]
 
     status = pi_worker._embed_once(
-        post_fn=post_fn, embed_fn=embed_fn,
-        ollama_url="http://localhost:11434", model="bge-m3")
+        post_fn=post_fn, embed_fn=embed_fn, model="bge-m3")
     assert status == "dispatched"
     paths = [p for p, _ in posts]
     assert paths == ["/embed_pool/claim", "/embed_pool/complete"]
@@ -42,6 +41,26 @@ def test_embed_once_empty_when_no_job():
         return {"job": None}
 
     status = pi_worker._embed_once(
-        post_fn=post_fn, embed_fn=lambda t, m: [0.0],
-        ollama_url="http://localhost:11434", model="bge-m3")
+        post_fn=post_fn, embed_fn=lambda t, m: [0.0], model="bge-m3")
     assert status == "empty"
+
+
+def test_golden_once_claims_and_completes():
+    posts = []
+
+    def post_fn(path, body):
+        posts.append((path, body))
+        if path == "/embed_pool/golden/claim":
+            return {"job": {"embed_id": "emb_g", "text": "probe", "model": "bge-m3"}}
+        return {}
+
+    status = pi_worker._golden_once(
+        post_fn=post_fn, embed_fn=lambda t, m: [0.6, 0.8], model="bge-m3")
+    assert status == "dispatched"
+    assert [p for p, _ in posts] == ["/embed_pool/golden/claim", "/embed_pool/golden/complete"]
+    assert posts[1][1] == {"embed_id": "emb_g", "vector": [0.6, 0.8]}
+
+
+def test_golden_once_empty_when_no_job():
+    assert pi_worker._golden_once(
+        post_fn=lambda p, b: {"job": None}, embed_fn=lambda t, m: [0.0], model="bge-m3") == "empty"

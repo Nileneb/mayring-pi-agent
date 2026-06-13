@@ -352,7 +352,7 @@ def _cloud_loop(stop: threading.Event, poll_interval: float) -> None:
         delay[0] = _next_idle_delay(status, delay[0], poll_interval, cap)
 
 
-def _embed_once(*, post_fn, embed_fn, ollama_url: str, model: str) -> str:
+def _embed_once(*, post_fn, embed_fn, model: str) -> str:
     """One embed claim->compute->complete cycle. Returns 'dispatched' | 'empty'.
     embed_fn(text, model) -> list[float] is injected so the loop is testable without
     Ollama; the real loop binds it to ollama_client.embed_single."""
@@ -366,6 +366,7 @@ def _embed_once(*, post_fn, embed_fn, ollama_url: str, model: str) -> str:
 
 
 def _golden_once(*, post_fn, embed_fn, model: str) -> str:
+    """One golden-test claim->compute->complete cycle (collusion-breaker for quarantined devices). Returns 'dispatched' | 'empty'."""
     resp = post_fn("/embed_pool/golden/claim", {"capabilities": ["embed"]})
     if not resp or not resp.get("job"):
         return "empty"
@@ -376,7 +377,7 @@ def _golden_once(*, post_fn, embed_fn, model: str) -> str:
 
 
 def _embed_loop(stop: threading.Event, poll_interval: float) -> None:
-    """Embedding-pool polling loop (opt-in via PI_EMBED_POLLING + PI_EMBED_ENABLED).
+    """Embedding-pool polling loop (opt-in via PI_EMBED_ENABLED).
     Drains regular embed jobs first, then any golden test-job assigned to this device."""
     from mayring_core.ollama_client import embed_single
     api = os.getenv("MAYRING_API_URL", "https://mcp.linn.games").rstrip("/")
@@ -387,6 +388,7 @@ def _embed_loop(stop: threading.Event, poll_interval: float) -> None:
         logger.warning("pi_worker: embed-polling enabled but no JWT at %s", jwt_path)
         return
     if not token:
+        logger.warning("pi_worker: embed-polling enabled but JWT empty")
         return
     worker_id = _worker_id()
     ollama = _resolve_ollama_url()
@@ -410,9 +412,9 @@ def _embed_loop(stop: threading.Event, poll_interval: float) -> None:
 
     _post("/devices/register", {"device_id": worker_id, "capabilities": _capabilities()})
     delay = poll_interval
-    cap = float(os.getenv("PI_CLOUD_IDLE_MAX_INTERVAL", str(_DEFAULT_CLOUD_IDLE_MAX_INTERVAL)))
+    cap = float(os.getenv("PI_EMBED_IDLE_MAX_INTERVAL", str(_DEFAULT_CLOUD_IDLE_MAX_INTERVAL)))
     while not stop.is_set():
-        status = _embed_once(post_fn=_post, embed_fn=_embed_fn, ollama_url=ollama, model=embed_model)
+        status = _embed_once(post_fn=_post, embed_fn=_embed_fn, model=embed_model)
         if status == "empty":
             status = _golden_once(post_fn=_post, embed_fn=_embed_fn, model=embed_model)
         delay = _next_idle_delay(status, delay, poll_interval, cap)
@@ -493,7 +495,7 @@ def start(
                 daemon=True,
             )
             _cloud_thread.start()
-        if os.getenv("PI_EMBED_POLLING", "").lower() in ("1", "true", "yes"):
+        if os.getenv("PI_EMBED_ENABLED", "").lower() in ("1", "true", "yes"):
             _embed_thread = threading.Thread(
                 target=_embed_loop, args=(_stop_event, cloud_poll_interval),
                 name="pi-worker-embed", daemon=True)
