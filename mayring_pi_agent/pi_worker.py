@@ -376,19 +376,28 @@ def _golden_once(*, post_fn, embed_fn, model: str) -> str:
     return "dispatched"
 
 
+def _embed_auth_token() -> str:
+    """Auth token for the embed-pool calls. Prefer MCP_SERVICE_TOKEN (resolves to the
+    'system' workspace on the trusted u-server house-confirmer — where audit jobs live);
+    fall back to the per-user hook.jwt for a dev/per-user confirmer. Empty string if neither."""
+    svc = os.getenv("MCP_SERVICE_TOKEN", "").strip()
+    if svc:
+        return svc
+    jwt_path = os.getenv("MAYRING_HOOK_JWT") or str(Path.home() / ".config" / "mayring" / "hook.jwt")
+    try:
+        return Path(jwt_path).read_text().strip()
+    except OSError:
+        return ""
+
+
 def _embed_loop(stop: threading.Event, poll_interval: float) -> None:
     """Embedding-pool polling loop (opt-in via PI_EMBED_ENABLED).
     Drains regular embed jobs first, then any golden test-job assigned to this device."""
     from mayring_core.ollama_client import embed_single
     api = os.getenv("MAYRING_API_URL", "https://mcp.linn.games").rstrip("/")
-    jwt_path = os.getenv("MAYRING_HOOK_JWT") or str(Path.home() / ".config" / "mayring" / "hook.jwt")
-    try:
-        token = Path(jwt_path).read_text().strip()
-    except OSError:
-        logger.warning("pi_worker: embed-polling enabled but no JWT at %s", jwt_path)
-        return
+    token = _embed_auth_token()
     if not token:
-        logger.warning("pi_worker: embed-polling enabled but JWT empty")
+        logger.warning("pi_worker: embed-polling enabled but no MCP_SERVICE_TOKEN and no hook.jwt")
         return
     worker_id = _worker_id()
     ollama = _resolve_ollama_url()
