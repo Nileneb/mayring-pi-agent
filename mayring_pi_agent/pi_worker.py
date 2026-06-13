@@ -62,6 +62,7 @@ _stop_event: threading.Event | None = None
 _executor: ThreadPoolExecutor | None = None
 _loop_thread: threading.Thread | None = None
 _cloud_thread: threading.Thread | None = None
+_embed_thread: threading.Thread | None = None
 
 
 _OLLAMA_CONFIG_FILE = Path.home() / ".config" / "mayring" / "ollama.conf"
@@ -143,6 +144,10 @@ def _capabilities() -> list[str]:
     # registry caps (e.g. ["local-gpu"]) never match → jobs sit queued forever.
     if "research" not in caps:
         caps.append("research")
+    # WHY(#365): a game-PC opts into the embedding pool via PI_EMBED_ENABLED; only
+    # then does it advertise 'embed' so the cloud routes bge-m3 jobs to it.
+    if os.getenv("PI_EMBED_ENABLED", "").lower() in ("1", "true", "yes") and "embed" not in caps:
+        caps.append("embed")
     return caps
 
 
@@ -347,6 +352,74 @@ def _cloud_loop(stop: threading.Event, poll_interval: float) -> None:
         delay[0] = _next_idle_delay(status, delay[0], poll_interval, cap)
 
 
+def _embed_once(*, post_fn, embed_fn, ollama_url: str, model: str) -> str:
+    """One embed claim->compute->complete cycle. Returns 'dispatched' | 'empty'.
+    embed_fn(text, model) -> list[float] is injected so the loop is testable without
+    Ollama; the real loop binds it to ollama_client.embed_single."""
+    resp = post_fn("/embed_pool/claim", {"capabilities": ["embed"]})
+    if not resp or not resp.get("job"):
+        return "empty"
+    job = resp["job"]
+    vector = embed_fn(job["text"], job.get("model") or model)
+    post_fn("/embed_pool/complete", {"embed_id": job["embed_id"], "vector": vector})
+    return "dispatched"
+
+
+def _golden_once(*, post_fn, embed_fn, model: str) -> str:
+    resp = post_fn("/embed_pool/golden/claim", {"capabilities": ["embed"]})
+    if not resp or not resp.get("job"):
+        return "empty"
+    job = resp["job"]
+    vector = embed_fn(job["text"], job.get("model") or model)
+    post_fn("/embed_pool/golden/complete", {"embed_id": job["embed_id"], "vector": vector})
+    return "dispatched"
+
+
+def _embed_loop(stop: threading.Event, poll_interval: float) -> None:
+    """Embedding-pool polling loop (opt-in via PI_EMBED_POLLING + PI_EMBED_ENABLED).
+    Drains regular embed jobs first, then any golden test-job assigned to this device."""
+    from mayring_core.ollama_client import embed_single
+    api = os.getenv("MAYRING_API_URL", "https://mcp.linn.games").rstrip("/")
+    jwt_path = os.getenv("MAYRING_HOOK_JWT") or str(Path.home() / ".config" / "mayring" / "hook.jwt")
+    try:
+        token = Path(jwt_path).read_text().strip()
+    except OSError:
+        logger.warning("pi_worker: embed-polling enabled but no JWT at %s", jwt_path)
+        return
+    if not token:
+        return
+    worker_id = _worker_id()
+    ollama = _resolve_ollama_url()
+    embed_model = os.getenv("MAYRING_EMBED_MODEL", "bge-m3")
+
+    def _post(path: str, body: dict, timeout: float = 240.0) -> dict | None:
+        req = urllib.request.Request(
+            f"{api}{path}", data=json.dumps(body).encode(),
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json",
+                     "X-Device-Id": worker_id},
+            method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
+                return json.loads(resp.read())
+        except (urllib.error.URLError, json.JSONDecodeError, OSError):
+            return None
+
+    def _embed_fn(text: str, model: str) -> list[float]:
+        return embed_single(ollama, model, text)
+
+    _post("/devices/register", {"device_id": worker_id, "capabilities": _capabilities()})
+    delay = poll_interval
+    cap = float(os.getenv("PI_CLOUD_IDLE_MAX_INTERVAL", str(_DEFAULT_CLOUD_IDLE_MAX_INTERVAL)))
+    while not stop.is_set():
+        status = _embed_once(post_fn=_post, embed_fn=_embed_fn, ollama_url=ollama, model=embed_model)
+        if status == "empty":
+            status = _golden_once(post_fn=_post, embed_fn=_embed_fn, model=embed_model)
+        delay = _next_idle_delay(status, delay, poll_interval, cap)
+        if status != "dispatched":
+            stop.wait(delay)
+
+
 def _ensure_schema() -> None:
     """Run the idempotent migration on the DB the worker will read.
 
@@ -390,7 +463,7 @@ def start(
     Always starts the LOCAL loop. CLOUD loop is on by default; opt out
     with PI_CLOUD_POLLING=false. Cloud loop also requires a hook JWT.
     """
-    global _started, _stop_event, _loop_thread, _cloud_thread
+    global _started, _stop_event, _loop_thread, _cloud_thread, _embed_thread
     with _lock:
         if _started:
             return False
@@ -420,6 +493,11 @@ def start(
                 daemon=True,
             )
             _cloud_thread.start()
+        if os.getenv("PI_EMBED_POLLING", "").lower() in ("1", "true", "yes"):
+            _embed_thread = threading.Thread(
+                target=_embed_loop, args=(_stop_event, cloud_poll_interval),
+                name="pi-worker-embed", daemon=True)
+            _embed_thread.start()
         _started = True
         logger.info(
             "pi_worker: started (local poll=%.1fs, cloud=%s)",
@@ -430,13 +508,13 @@ def start(
 
 def stop(timeout: float = 2.0) -> None:
     """Stop the loops and shut the executor down. Used from tests."""
-    global _started, _stop_event, _executor, _loop_thread, _cloud_thread
+    global _started, _stop_event, _executor, _loop_thread, _cloud_thread, _embed_thread
     with _lock:
         if not _started:
             return
         if _stop_event is not None:
             _stop_event.set()
-        for t in (_loop_thread, _cloud_thread):
+        for t in (_loop_thread, _cloud_thread, _embed_thread):
             if t is not None:
                 t.join(timeout=timeout)
         if _executor is not None:
@@ -445,6 +523,7 @@ def stop(timeout: float = 2.0) -> None:
         _executor = None
         _loop_thread = None
         _cloud_thread = None
+        _embed_thread = None
         _started = False
 
 
