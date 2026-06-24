@@ -1,5 +1,9 @@
 # mayring-pi-agent
 
+> **Ökosystem:** Teil des 4-Repo-MayringCoder-Systems (Pi-Agent Microservice, :8091).
+> Gesamtkarte: [`MayringCoder/ARCHITECTURE.md`](https://github.com/Nileneb/MayringCoder/blob/master/ARCHITECTURE.md).
+> Eingebunden als Git-Submodule `vendor/mayring-pi-agent`.
+
 Read-only Pi-Agent als eigenständiger Microservice — aus MayringCoder ausgelagert
 (Stufe 3 der Modularisierung, [#266](https://github.com/Nileneb/MayringCoder/issues/266)).
 History via `git subtree split` erhalten.
